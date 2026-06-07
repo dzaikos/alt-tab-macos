@@ -1,0 +1,48 @@
+name: AltTab Pro Free ARM Build
+on:
+  push:
+    branches:
+      - master
+  workflow_run:
+    workflows: ["Sync fork"]
+    types:
+      - completed
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  APPCENTER_SECRET: ${{ secrets.APPCENTER_SECRET }}
+  APPCENTER_TOKEN: ${{ secrets.APPCENTER_TOKEN }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_P12_CERTIFICATE: ${{ secrets.APPLE_P12_CERTIFICATE }}
+  SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+  GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+  GITHUB_EVENT_AFTER: ${{ github.event.after }}
+  BUILD_DIR: ${{ github.workspace }}
+  XCODE_BUILD_PATH: DerivedData/Build/Products/Release
+  VERSION_FILE: VERSION.txt
+  APP_NAME: AltTab
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - run: sudo xcode-select -s /Applications/Xcode_26.0.1.app/Contents/Developer
+      - run: scripts/print_env.sh
+      - run: |
+          sed -i '' 's/\(xcodebuild -project alt-tab-macos.xcodeproj -scheme Release -derivedDataPath DerivedData\)/\1 ARCHS="arm64" ONLY_ACTIVE_ARCH=NO CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO DEVELOPMENT_TEAM=""/' scripts/build_app.sh
+          sed -i '' 's/\(    func computeState() -> LicenseState {\)/\1\n        return .pro\n        #if false/' src/pro/license/LicenseManager.swift
+          sed -i '' 's/\(        return computeTrialState()\)/\1\n        #endif/' src/pro/license/LicenseManager.swift
+          sed -i '' 's/\(        UserDefaults.standard.register(defaults: \["NSApplicationCrashOnExceptions": true\])\)/\1\n        #if false/' src/vendors/AppCenterCrashes.swift
+          sed -i '' 's/\(        AppCenter.start(withAppSecret: AppCenterCrash.secret, services: \[Crashes.self\])\)/\1\n        #endif/' src/vendors/AppCenterCrashes.swift
+      - run: |
+          VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')
+          echo "$VERSION" >"$VERSION_FILE"
+          echo "APP_VERSION=$VERSION" >>$GITHUB_ENV
+      - run: scripts/replace_environment_variables_in_app.sh
+      - run: scripts/build_app.sh
+      - run: ditto -c -k --sequesterRsrc --keepParent "$XCODE_BUILD_PATH/$APP_NAME.app" "$APP_NAME-$APP_VERSION.zip"
+      - run: gh release create "v${{ env.APP_VERSION }}" "${{ env.APP_NAME }}-${{ env.APP_VERSION }}.zip" --title "v${{ env.APP_VERSION }}" --notes "AltTab Pro for Apple Silicon (ARM) architecture. Bypasses license check to enable Pro features and disables crash reporting telemetry. This application is not notarized, in the Terminal run \`sudo xattr -cr /Applications/AltTab.app\` to bypass gatekeeper. If you like this software, support the [upstream developer](https://github.com/lwouis/alt-tab-macos)." --target master
