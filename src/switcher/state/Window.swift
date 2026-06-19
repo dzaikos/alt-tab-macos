@@ -47,14 +47,18 @@ class Window {
 
     init(_ axUiElement: AXUIElement, _ application: Application, _ wid: CGWindowID, _ title: String?, _ isFullscreen: Bool?, _ isMinimized: Bool?, _ position: CGPoint?, _ size: CGSize?) {
         state = WindowState(
-            id: "wid-\(wid)", isInvisible: false, isWindowlessApp: false,
+            id: "wid-\(wid)", isPhantom: false, isWindowlessApp: false,
             isFullscreen: false, isMinimized: false, isTabbed: false,
             isOnAllSpaces: false, spaceIds: [CGSSpaceID.max], spaceIndexes: [SpaceIndex.max],
             lastFocusOrder: .zero, creationOrder: .zero, title: "")
         self.axUiElement = axUiElement
         self.application = application
         cgWindowId = wid
-        self.updateSpacesAndScreen()
+        // Default a new window to the current Space rather than fetching its Space here: that fetch is a
+        // blocking CGS call and `Window.init` runs on the main thread (#5721). A brand-new window is on the
+        // current Space ~always; the rare exception (an app restoring a window onto another Space) is
+        // corrected off-main by Applications.syncSpacesState.
+        self.updateSpacesAndScreen([wid: [Spaces.currentSpaceId]])
         updateFromAxAttributes(title, size, position, isFullscreen, isMinimized)
         debugId = "\(self.application.debugId) (wid:\(cgWindowId) title:\(self.title))"
         Window.globalCreationCounter += 1
@@ -72,7 +76,7 @@ class Window {
 
     init(_ application: Application) {
         state = WindowState(
-            id: "pid-\(application.pid)", isInvisible: false, isWindowlessApp: true,
+            id: "pid-\(application.pid)", isPhantom: false, isWindowlessApp: true,
             isFullscreen: false, isMinimized: false, isTabbed: false,
             isOnAllSpaces: false, spaceIds: [CGSSpaceID.max], spaceIndexes: [SpaceIndex.max],
             lastFocusOrder: .zero, creationOrder: .zero, title: "")
@@ -114,15 +118,17 @@ class Window {
         self.isFullscreen = isFullscreen ?? false
         self.isMinimized = isMinimized ?? false
         lastSearchQuery = nil
-        recomputeIsInvisible()
+        recomputeIsPhantom()
     }
 
-    /// Local "ghost" signal: window has no Space (CGS lost track of it).
-    /// Catches Joplin / Sprig / "show:false" Electron windows at creation time.
-    /// Doesn't catch alpha=0 (Outlook reminders) — those keep a Space; Applications.refreshIsInvisible is the catch-all.
-    /// Reuses the spaceIds already populated by updateSpaces (cgWindowId.spaces()) — no new CGS call.
-    func recomputeIsInvisible() {
-        self.isInvisible = self.spaceIds.isEmpty && !self.isTabbed && !self.isMinimized && !self.isHidden
+    /// Synchronous "phantom" detection — assert-only (may set `isPhantom`, never clears it). Catches the
+    /// strong signal (no Space at all: Joplin / Sprig / "show:false" Electron) at creation/show time,
+    /// reusing the spaceIds already populated by updateSpaces (cgWindowId.spaces()) — no new CGS call.
+    /// Clearing is owned by Applications.refreshIsPhantom (the authoritative CGS-based catch-all that
+    /// also handles alpha=0 / orderOut: phantoms that keep a Space); clearing here would clobber it on
+    /// every show. See PhantomWindowDetector.syncVerdict and PhantomWindowDetection.swift (#5714).
+    func recomputeIsPhantom() {
+        self.isPhantom = PhantomWindowDetector.syncVerdict(state, application.state)
     }
 
     func isEqualRobust(_ otherWindowAxUiElement: AXUIElement, _ otherWindowWid: CGWindowID?) -> Bool {
@@ -260,31 +266,45 @@ class Window {
             // macOS bug: when switching to a System Preferences window in another space, it switches to that space,
             // but quickly switches back to another window in that space
             // You can reproduce this buggy behaviour by clicking on the dock icon, proving it's an OS bug
+            let originSpaceId = Spaces.currentSpaceId
+            let targetOnCurrentSpace = self.spaceIds.contains(originSpaceId)
+            let originFrontPid = targetOnCurrentSpace ? nil : NSWorkspace.shared.frontmostApplication?.processIdentifier
             BackgroundWork.accessibilityCommandsQueue.addOperation { [weak self] in
                 guard let self else { return }
+                if self.isMinimized {
+                    try? self.axUiElement!.setAttribute(kAXMinimizedAttribute, false)
+                }
+                // Focusing another app's window reliably takes the steps below. The public APIs alone don't
+                // move key focus across apps (macOS 14 downgraded NSRunningApplication.activate to an advisory
+                // "request").
+                //   1. _SLPSSetFrontProcessWithOptions fronts the process + the target window (passing the wid
+                //      raises only that window, not all the app's windows). For a cross-Space target it also
+                //      makes macOS switch to a Space showing it. The global front clobbers the front process of
+                //      other Spaces where the app has windows (they pop on Space entry, #4507); step 4 repairs
+                //      the origin Space for a cross-Space focus.
+                //   2. makeKeyWindow: make it key, via a synthetic mouse-down/up aimed just outside the window,
+                //      so it becomes key without clicking its content (a top-left click would hit fullscreen UI, #5381).
+                //   3. focusWindow (kAXRaiseAction): raise it within the app's own window stack.
+                //   4. cross-Space only: restore the origin Space's front process (see snapshot above).
                 var psn = ProcessSerialNumber()
                 GetProcessForPID(self.application.pid, &psn)
                 _SLPSSetFrontProcessWithOptions(&psn, self.cgWindowId!, SLPSMode.userGenerated.rawValue)
-                self.makeKeyWindow(&psn)
+                makeKeyWindow(&psn, self.cgWindowId!)
                 try? self.axUiElement!.focusWindow()
+                // step 4 (#4507): undo step 1's clobber of the origin Space. The front-switch made that Space
+                // remember our app as its front; restore the app that was there before (snapshotted above) so
+                // returning shows it, not our window. Cross-Space only (originFrontPid is nil otherwise), and
+                // skipped when the origin's front was already this app.
+                if let originFrontPid, originFrontPid != self.application.pid {
+                    var originPsn = ProcessSerialNumber()
+                    GetProcessForPID(originFrontPid, &originPsn)
+                    SLSSpaceSetFrontPSN(CGS_CONNECTION, originSpaceId, originPsn)
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(50)) {
                     WindowThumbnails.previewSelectedIfNeeded()
                 }
             }
         }
-    }
-
-    /// The following function was ported from https://github.com/Hammerspoon/hammerspoon/issues/370#issuecomment-545545468
-    private func makeKeyWindow(_ psn: inout ProcessSerialNumber) -> Void {
-        var bytes = [UInt8](repeating: 0, count: 0xf8)
-        bytes[0x04] = 0xf8
-        bytes[0x3a] = 0x10
-        memcpy(&bytes[0x3c], &cgWindowId, MemoryLayout<UInt32>.size)
-        memset(&bytes[0x20], 0xff, 0x10)
-        bytes[0x08] = 0x01
-        SLPSPostEventRecordTo(&psn, &bytes)
-        bytes[0x08] = 0x02
-        SLPSPostEventRecordTo(&psn, &bytes)
     }
 
     // for some windows (e.g. Slack), the AX API doesn't return a title; we try CG API; finally we resort to the app name
@@ -306,9 +326,21 @@ class Window {
         updateScreenId()
     }
 
+    /// Apply a freshly-queried window→Spaces map (from `Applications.syncSpacesState`), returning whether
+    /// `spaceIds` changed — the filter-relevant input — so the caller can skip a re-render when nothing
+    /// moved. `spaceIndexes`/`isOnAllSpaces`/`screenId` all derive from `spaceIds`.
+    @discardableResult
+    func applySpacesAndScreen(_ windowToSpacesMap: [CGWindowID: [CGSSpaceID]]) -> Bool {
+        let beforeSpaceIds = self.spaceIds
+        updateSpacesAndScreen(windowToSpacesMap)
+        return self.spaceIds != beforeSpaceIds
+    }
+
     private func updateSpaces(_ windowToSpacesMap: [CGWindowID: [CGSSpaceID]]? = nil) {
         guard let cgWindowId else { return }
-        var spaceIds = windowToSpacesMap?[cgWindowId] ?? cgWindowId.spaces()
+        // No blocking CGS fallback here: callers always supply the map (resolved off-main, or the current
+        // Space at creation). A window absent from the map is treated as on no queried Space (#5721).
+        var spaceIds = windowToSpacesMap?[cgWindowId] ?? []
         // inactive tabs return no space from CGSCopySpacesForWindows; use the active tab sibling's space
         if spaceIds.isEmpty, let activeTab = TabGroup.activeTabSibling(of: self) {
             spaceIds = activeTab.spaceIds
@@ -316,7 +348,7 @@ class Window {
         self.spaceIds = spaceIds
         self.spaceIndexes = spaceIds.compactMap { spaceId in Spaces.idsAndIndexes.first { $0.0 == spaceId }?.1 }
         self.isOnAllSpaces = spaceIds.count > 1
-        recomputeIsInvisible()
+        recomputeIsPhantom()
     }
 
     private func updateScreenId() {
@@ -346,15 +378,6 @@ class Window {
         // visible window-tab. Its data will match the tabbed window's
         // fallback to the focusedWindow
         self.isTabbed ? (TabGroup.activeTabSibling(of: self) ?? application.focusedWindow) : self
-    }
-
-    // Determines if this window is the main application window
-    func isAppMainWindow() -> Bool {
-        // AX calls done on main thread. They can block thus freeze the UI
-        // TODO: find a better approach
-        guard let appAxUiElement = application.axUiElement,
-              let mainWindow = try? appAxUiElement.attributes([kAXMainWindowAttribute]).mainWindow else { return false }
-        return (try? mainWindow.cgWindowId()) == cgWindowId
     }
 
     private func altTabWindow() -> NSWindow? {

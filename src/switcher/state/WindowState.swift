@@ -14,7 +14,7 @@ import Foundation
 /// without dragging in `Spaces` / SkyLight.
 struct WindowState: Equatable {
     var id: String
-    var isInvisible: Bool
+    var isPhantom: Bool
     var isWindowlessApp: Bool
     var isFullscreen: Bool
     var isMinimized: Bool
@@ -25,4 +25,7 @@ struct WindowState: Equatable {
     var lastFocusOrder: Int
     var creationOrder: Int
     var title: String
+    // cached AXMain (is this the app's main window). Read off-main with the other window attributes so
+    // `Windows.findMainWindow` reads a flag instead of doing AX IPC in a sort comparator on the show path.
+    var isMainWindow = false
 }

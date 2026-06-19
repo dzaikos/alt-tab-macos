@@ -17,24 +17,21 @@ class WindowDiscriminator {
             Logger.debug { logTemplate("size is \(Int(size.width))x\(Int(size.height)) which is < 100x50", app, wid, level, title, subrole, role, size) }
             return false
         }
-        let specialApp = books(app) || keynote(app) || preview(app, subrole) || iina(app) ||
-            openFlStudio(app, title) || crossoverWindow(app, role, subrole, level) ||
-            isAlwaysOnTopScrcpy(app, level, role, subrole)
-        let standardSubrole = [kAXStandardWindowSubrole, kAXDialogSubrole].contains(subrole)
-        let appSpecificSubrole = openBoard(app) || adobeAudition(app, subrole) || adobeAfterEffects(app, subrole) ||
-            adobePremierePro(app, subrole) ||
-            steam(app, title, role) || worldOfWarcraft(app, role) || battleNetBootstrapper(app, role) ||
-            firefox(app, role, size) || vlcFullscreenVideo(app, role) || sanGuoShaAirWD(app) ||
-            dvdFab(app) || drBetotte(app) || androidEmulator(app, title) || autocad(app, subrole)
-        guard specialApp || standardSubrole || appSpecificSubrole else {
+        // ordered cheapest-first so `||`/`&&` short-circuit; nothing below is computed unless needed.
+        // a standard subrole (the overwhelmingly common case) accepts before any per-app work; the per-app
+        // chains — string compares plus a KERN_PROCARGS sysctl for bundle-id-less apps (androidEmulator) —
+        // run only for the rare non-standard window. isSpecialApp is re-checked below but only reaches that
+        // line on the rare accepted-non-standard path; the common case evaluates it at most once.
+        guard isStandardSubrole(subrole) || isSpecialApp(app, title, subrole, role, level) || appSpecificSubrole(app, title, role, subrole, size) else {
             Logger.debug { logTemplate("subrole is '\(subrole ?? "nil")' instead of '\(kAXStandardWindowSubrole)'/'\(kAXDialogSubrole)'", app, wid, level, title, subrole, role, size) }
             return false
         }
-        if !specialApp {
+        if !isSpecialApp(app, title, subrole, role, level) {
             guard mustHaveIfJetbrainApp(app, title, subrole, size) &&
                 mustHaveIfSteam(app, title, role) &&
                 mustHaveIfFusion360(app, title, role) &&
-                mustHaveIfColorSlurp(app, subrole) else {
+                mustHaveIfColorSlurp(app, subrole) &&
+                mustHaveIfAndroidEmulator(app, title) else {
                 Logger.debug { logTemplate("of a hardcoded rule for this app", app, wid, level, title, subrole, role, size) }
                 return false
             }
@@ -45,6 +42,24 @@ class WindowDiscriminator {
 
     private static func logTemplate(_ rejectionReason: String?, _ app: Application, _ wid: CGWindowID, _ level: CGWindowLevel, _ title: String?, _ subrole: String?, _ role: String?, _ size: CGSize?) -> String {
         "Window \(rejectionReason == nil ? "accepted" : "rejected") \(app.debugId)\(rejectionReason == nil ? "" : " because \(rejectionReason)") \((wid, level, title, subrole, role, size))"
+    }
+
+    private static func isStandardSubrole(_ subrole: String?) -> Bool {
+        return [kAXStandardWindowSubrole, kAXDialogSubrole].contains(subrole)
+    }
+
+    private static func isSpecialApp(_ app: Application, _ title: String?, _ subrole: String?, _ role: String?, _ level: CGWindowLevel) -> Bool {
+        return books(app) || keynote(app) || preview(app, subrole) || iina(app) ||
+            openFlStudio(app, title) || crossoverWindow(app, role, subrole, level) ||
+            isAlwaysOnTopScrcpy(app, level, role, subrole)
+    }
+
+    private static func appSpecificSubrole(_ app: Application, _ title: String?, _ role: String?, _ subrole: String?, _ size: CGSize?) -> Bool {
+        return openBoard(app) || adobeAudition(app, subrole) || adobeAfterEffects(app, subrole) ||
+            adobePremierePro(app, subrole) ||
+            steam(app, title, role) || worldOfWarcraft(app, role) || battleNetBootstrapper(app, role) ||
+            firefox(app, role, size) || vlcFullscreenVideo(app, role) || sanGuoShaAirWD(app) ||
+            dvdFab(app) || drBetotte(app) || androidEmulator(app, title) || autocad(app, subrole)
     }
 
     private static func mustHaveIfFusion360(_ app: Application, _ title: String?, _ role: String?) -> Bool {
@@ -158,8 +173,18 @@ class WindowDiscriminator {
     }
 
     private static func androidEmulator(_ app: Application, _ title: String?) -> Bool {
-        // android emulator small vertical menu is a "window" with empty title; we exclude it
+        // rescue a titled emulator window that has a non-standard subrole (so isStandardSubrole missed it).
+        // empty-title emulator windows are dropped elsewhere: the side menu by the size guard, the
+        // transient overlay by mustHaveIfAndroidEmulator.
         return title != "" && ApplicationDiscriminator.isAndroidEmulator(app.bundleIdentifier, app.pid)
+    }
+
+    private static func mustHaveIfAndroidEmulator(_ app: Application, _ title: String?) -> Bool {
+        // The emulator spawns a transient ~device-sized AXDialog with an empty title on every focus
+        // change/summon; with a standard subrole it slips past the accept gate and flickers into the
+        // switcher as "qemu-system-aarch64" (#5740). The real device window always has a title
+        // ("Android Emulator - <avd>:<port>"), so require a non-empty title for emulator windows.
+        return !ApplicationDiscriminator.isAndroidEmulator(app.bundleIdentifier, app.pid) || (title != nil && title != "")
     }
 
     private static func crossoverWindow(_ app: Application, _ role: String?, _ subrole: String?, _ level: CGWindowLevel) -> Bool {

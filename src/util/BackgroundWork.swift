@@ -58,14 +58,15 @@ class BackgroundWork {
 
     static func addPotentialThreadCount(_ additionalCount: Int) {
         totalPotentialThreadCount += additionalCount
-        // a macos process has a soft limit of 64 threads. We need to be careful to don't spawn too many threads through DispatchQueues
-        assert(totalPotentialThreadCount <= 45)
+        // a macos process has a soft limit of 64 threads. We need to be careful to don't spawn too many threads through DispatchQueues.
+        // budget: BackgroundWork (~20) + AXCallScheduler (24) + CGSCallScheduler (2) + ProcessCallScheduler (2) + crashReports (1) = 49
+        assert(totalPotentialThreadCount <= 50)
     }
 
     #if DEBUG
     // dev-only helpers to inspect thread count / queue depth; call from lldb when diagnosing
     private static func logQueues() -> Void {
-        let queues = [screenshotsQueue, accessibilityCommandsQueue, AXCallScheduler.shared.axQueryFirstTryQueue, AXCallScheduler.shared.axQueryScanQueue, AXCallScheduler.shared.axQueryRetryQueue, crashReportsQueue].compactMap { $0 }
+        let queues = [screenshotsQueue, accessibilityCommandsQueue, AXCallScheduler.shared.axQueryFirstTryQueue, AXCallScheduler.shared.axQueryScanQueue, AXCallScheduler.shared.axQueryRetryQueue, CGSCallScheduler.debugQueue, ProcessCallScheduler.debugQueue, crashReportsQueue].compactMap { $0 }
         var map = [String:Int]()
         for queue in queues {
             map[queue.underlyingQueue!.label] = queue.operations.reduce(0) { $1.isExecuting ? $0 + 1 : $0 }
