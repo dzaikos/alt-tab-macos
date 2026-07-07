@@ -29,7 +29,7 @@ jobs:
       - run: sudo xcode-select -s /Applications/Xcode_26.0.1.app/Contents/Developer
       - run: scripts/print_env.sh
       - run: |
-          sed -i '' 's/\(xcodebuild -project alt-tab-macos.xcodeproj -scheme Release -derivedDataPath DerivedData\)/\1 ARCHS="arm64" ONLY_ACTIVE_ARCH=NO CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO DEVELOPMENT_TEAM=""/' scripts/build_app.sh
+          sed -i '' 's/\(xcodebuild -project alt-tab-macos.xcodeproj -scheme Release -derivedDataPath DerivedData\)/\1 ARCHS="arm64" ONLY_ACTIVE_ARCH=NO CODE_SIGN_IDENTITY="-" DEVELOPMENT_TEAM=""/' scripts/build_app.sh
           sed -i '' 's/\(    func computeState() -> LicenseState {\)/\1\n        return .pro\n        #if false/' src/pro/license/LicenseManager.swift
           sed -i '' 's/\(        return computeTrialState()\)/\1\n        #endif/' src/pro/license/LicenseManager.swift
           sed -i '' 's/\(        UserDefaults.standard.register(defaults: \["NSApplicationCrashOnExceptions": true\])\)/\1\n        #if false/' src/vendors/AppCenterCrashes.swift
