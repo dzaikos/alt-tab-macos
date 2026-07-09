@@ -15,6 +15,19 @@ class WindowServerEvents {
     private static var inSpaceTransition: Bool { ProcessInfo.processInfo.systemUptime < spaceTransitionUntil }
     /// debounces the 1329/1401 Space-change burst into one settled handler (replaces SpacesEvents)
     private static var spaceChangeWorkItem: DispatchWorkItem?
+    /// Per-app activation state (see `ActivationFocusResolver`, the pure kernel deciding which 808s bump the
+    /// MRU around an activation and when the AX backstop yields — first 808 = focus, raise tail swallowed,
+    /// #5596). Keyed by pid so two quick activations don't clobber each other; `until` bounds each entry so a
+    /// straggler can't linger; expired entries are pruned on the next activation and on touch.
+    private static var pendingActivationRaises = [pid_t: ActivationEntry]()
+    /// The window AltTab itself just focused (switcher selection / CLI --focus), consumed by the next
+    /// didActivate of that app: the target is KNOWN, so the activation bumps it directly instead of divining
+    /// it from a racy 808 / AX read (see `ActivationFocusResolver.onActivation`). Time-bounded and one-shot.
+    private static var altTabInitiatedFocus: (wid: CGWindowID, pid: pid_t, at: TimeInterval)?
+
+    static func noteAltTabInitiatedFocus(_ wid: CGWindowID, _ pid: pid_t) {
+        altTabInitiatedFocus = (wid, pid, ProcessInfo.processInfo.systemUptime)
+    }
 
     static func observe() {
         guard !started else { return }
@@ -35,8 +48,49 @@ class WindowServerEvents {
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { note in
             if let app = runningApp(note) {
-                Applications.frontmostPid = app.processIdentifier
-                bumpFocusOnActivation(app.processIdentifier)
+                let pid = app.processIdentifier
+                Applications.frontmostPid = pid
+                // On activation macOS emits 808s for the app's on-Space windows: the FIRST is the focused
+                // window (bumped by the 808 handler), the rest are raises (see `pendingActivationRaises`).
+                // Re-fronting the raises would reverse the app's MRU order (regression from the AX→WS
+                // migration; the AX path only signalled the one focused window). Snapshot the app's windows so
+                // the 808 handler can swallow the raise tail; `bumpFocusOnActivation` is the AX backstop for
+                // activations that emit no 808 at all. Only windows the storm can actually raise belong in the
+                // set — a window that is NOT raised never consumes its entry, so a genuine focus of it within
+                // the window would be swallowed. Excluded on that basis: minimized windows (not raised;
+                // un-minimizing one right after activation must bump) and INACTIVE TABS (not on-screen, never
+                // raised; clicking one's tab is often the very click that activates the app — the "click the
+                // other Terminal tab" bug). Off-Space windows aren't raised either but are harmless if listed:
+                // focusing one needs a Space switch, which re-activates and rebuilds this set. Time-bounded so
+                // a straggler entry can't outlive the burst and swallow a later genuine focus.
+                let now = ProcessInfo.processInfo.systemUptime
+                pendingActivationRaises = pendingActivationRaises.filter { $0.value.until > now }  // prune expired
+                let wids = Set(Windows.list.compactMap { $0.application.pid == pid && !$0.isMinimized && !$0.isTabbed ? $0.cgWindowId : nil })
+                // 0.5s is deliberately generous (the storm is observed ~10-60ms after activation). The risk is
+                // asymmetric: too SHORT is dangerous — the raise 808s are processed on the main thread behind
+                // AltTab's own activation work (discovery/screenshots/phantom pass), so under load their
+                // processing can lag well past that; if the window expires first, the leftover raises bump and
+                // the MRU inverts again. Too LONG is nearly harmless — a window you can focus by hand is on this
+                // Space and its entry is consumed by its own raise, so its genuine click (a later 808) is no
+                // longer in the set and bumps; only off-Space entries linger, and focusing one requires a Space
+                // switch that re-activates the app and rebuilds this set.
+                // AltTab-initiated focus: the target is known — bump it directly, skip the AX backstop.
+                var knownTarget: CGWindowID? = nil
+                if let intent = altTabInitiatedFocus, intent.pid == pid, now - intent.at < 1 {
+                    knownTarget = intent.wid
+                    altTabInitiatedFocus = nil
+                }
+                let activation = ActivationFocusResolver.onActivation(snapshotWids: wids, until: now + 0.5, altTabTarget: knownTarget)
+                pendingActivationRaises[pid] = activation.entry
+                if let bumpWid = activation.bumpWid, let window = Windows.byWindowId[bumpWid] {
+                    window.application.focusedWindow = window
+                    App.checkIfShortcutsShouldBeDisabled(window, nil)
+                    if let changed = Windows.updateLastFocusOrder(window) {
+                        App.refreshOpenUiAfterExternalEvent(changed)
+                    }
+                } else {
+                    bumpFocusOnActivation(pid)
+                }
             }
         }
         center.addObserver(forName: NSWorkspace.didHideApplicationNotification, object: nil, queue: .main) { note in
@@ -98,7 +152,14 @@ class WindowServerEvents {
                 // the flag for the rare ordering where the create event lands after the window was appended.
                 // Consume it whatever the outcome, so only that first focus is exempt from the guard.
                 let wasJustCreated = Windows.recentlyCreatedWindows.remove(w0) != nil
-                if window.application.runningApplication.isActive || wasJustCreated {
+                // Around an app activation, which 808s bump is subtle (first = focus, raise tail swallowed,
+                // #5596) — `ActivationFocusResolver` holds those decisions; this just applies its verdict.
+                let pid = window.application.pid
+                let decision = ActivationFocusResolver.onFocusEvent(pendingActivationRaises[pid], wid: w0,
+                    now: ProcessInfo.processInfo.systemUptime, wasJustCreated: wasJustCreated,
+                    appIsActive: window.application.runningApplication.isActive)
+                pendingActivationRaises[pid] = decision.entry
+                if decision.bump {
                     window.application.focusedWindow = window
                     App.checkIfShortcutsShouldBeDisabled(window, nil)
                     if let changed = Windows.updateLastFocusOrder(window) {
@@ -119,6 +180,7 @@ class WindowServerEvents {
         case .remove:
             Windows.windowsPendingFocusPromotion.remove(w0)
             Windows.recentlyCreatedWindows.remove(w0)
+            Windows.windowsPendingSpaceRemoval.remove(w0)
             if let window = Windows.byWindowId[w0] {
                 Windows.removeWindows([window], true)
             }
@@ -173,14 +235,46 @@ class WindowServerEvents {
             }
         case .updateSpaceMembership:
             // 1325/1326 carry (spaceId, wid) in the payload, so update just that window's spaceIds — no CGS
-            // re-query / full rescan. Untracked wid → ignore (creation sets a window's initial Space, and
-            // discovery backstops). A missed delta self-heals on the next switcher-show syncSpacesState.
-            if let window = Windows.byWindowId[widInSpace],
-               window.applySpaceMembershipDelta(space, added: n == .windowAddedToSpace) {
+            // re-query / full rescan. Untracked wid → remember a removal so discovery can honor the empty Space
+            // (a rapid-burst background tab whose remove fires before it's tracked, #5830); a later add cancels
+            // it. Then the missed delta no longer strands the tab shown-as-separate until the next show.
+            guard let window = Windows.byWindowId[widInSpace] else {
+                if n == .windowRemovedFromSpace { Windows.windowsPendingSpaceRemoval.insert(widInSpace) }
+                else { Windows.windowsPendingSpaceRemoval.remove(widInSpace) }
+                return
+            }
+            // A tab SWITCH emits no focus event at all — just this Space swap (1325 for the tab coming
+            // on-screen, 1326 for the one leaving). Pre-migration the AX focused-window notification fired for
+            // it; 808 never does. So an inactive tab joining a Space while its app is frontmost IS the focus
+            // signal, and we bump the MRU here or the switcher shows a stale order after clicking another tab.
+            // Read `isTabbed` BEFORE reconcile flips it, and bump OUTSIDE the delta guard: the tab machinery
+            // backfills a background tab's spaceIds from its active sibling, so the 1325 add is usually a
+            // no-op delta (`applySpaceMembershipDelta` returns false).
+            let inactiveTabBecameActive = n == .windowAddedToSpace && window.isTabbed
+                && window.application.runningApplication.isActive
+            if window.applySpaceMembershipDelta(space, added: n == .windowAddedToSpace) {
                 // switching a fullscreen window's tabs swaps which one holds the Space — regroup so the
                 // newly-backgrounded tab stays shown instead of being flagged phantom
                 TabGroup.reconcile()
                 if SwitcherSession.isActive { App.refreshOpenUiAfterExternalEvent([window]) }
+            }
+            if inactiveTabBecameActive {
+                // Joining a Space puts the window ON-SCREEN, so by definition it is no longer an INACTIVE tab —
+                // either it became its group's active tab (tab switch) or it was dragged out to stand alone.
+                // Clear the flag NOW: the AX review can't heal a dragged-out window on its own — its nil-titles
+                // dissolution path skips `isTabbed` windows (an inactive tab legitimately reports nil), and its
+                // former group's active tab still reports a live AXTabGroup when 2+ tabs remain, so the stale
+                // flag kept the dragged-out window hidden forever. Mid-drag, geometry may have just re-linked it
+                // (transiently Space-less) — this clear is the counterpart when it lands back on-screen. The
+                // stale `tabbedSiblingWids` is left for the next AX review to dissolve (its nil-titles path
+                // runs once `isTabbed` is false).
+                window.isTabbed = false
+                window.recomputeIsPhantom()
+                window.application.focusedWindow = window
+                App.checkIfShortcutsShouldBeDisabled(window, nil)
+                if let changed = Windows.updateLastFocusOrder(window) {
+                    App.refreshOpenUiAfterExternalEvent(changed)
+                }
             }
         case .acquireAndDiscriminate:
             // Discover just this new wid right away (not the throttled full rescan — that was the ~1-2s
@@ -196,10 +290,12 @@ class WindowServerEvents {
         }
     }
 
-    /// AppKit app-activation is the backstop for a window-focus (808) the focus handler dropped because the
-    /// app wasn't frontmost yet — 808 and NSRunningApplication.isActive are separate clocks and 808 can win the
-    /// race (e.g. un-minimizing a background app's window). Read the now-front app's focused window from AX and
-    /// bump the MRU, same as a focus event would. Mirrors yabai's APPLICATION_FRONT_SWITCHED handler.
+    /// AppKit app-activation is the backstop for a window-focus (808) that never arrives (808 and
+    /// NSRunningApplication.isActive are separate clocks; some activations emit no 808 at all). Read the
+    /// now-front app's focused window from AX and bump the MRU, same as a focus event would. Mirrors yabai's
+    /// APPLICATION_FRONT_SWITCHED handler. This is the WEAK signal: the AX read races the app's internal focus
+    /// update and can return the PREVIOUS window (iTerm, #5596), so it YIELDS to the activation's first 808
+    /// (`focusBumped`) — checked at apply time on main, since the read is async and can land after the 808.
     private static func bumpFocusOnActivation(_ pid: pid_t) {
         guard let app = Applications.findOrCreate(pid, false), let appAx = app.axUiElement else { return }
         AXCallScheduler.shared.schedule(key: "pid-\(pid)-activation-focus", pid: pid) {
@@ -208,7 +304,8 @@ class WindowServerEvents {
             guard let focused = try? appAx.attributes([kAXFocusedWindowAttribute], pid: pid).focusedWindow,
                   let wid = try? focused.cgWindowId(pid: pid) else { return }
             DispatchQueue.main.async {
-                guard Applications.frontmostPid == pid, let window = Windows.byWindowId[wid] else { return }
+                guard Applications.frontmostPid == pid, let window = Windows.byWindowId[wid],
+                      ActivationFocusResolver.axBackstopShouldApply(pendingActivationRaises[pid]) else { return }
                 window.application.focusedWindow = window
                 App.checkIfShortcutsShouldBeDisabled(window, nil)
                 if let changed = Windows.updateLastFocusOrder(window) {
