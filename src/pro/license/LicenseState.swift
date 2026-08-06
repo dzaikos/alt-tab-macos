@@ -18,4 +18,17 @@ enum LicenseState: Equatable {
         case .proExpired, .trialExpired: return "Free"
         }
     }
+
+    /// Raw tier tag sent as the `tier` appcast feed parameter for install-base
+    /// analytics. Kept as the four distinct states (not the three-bucket
+    /// `debugProfileLabel`) so the backend can split churned-pro from never-paid;
+    /// the analytics view collapses proExpired+trialExpired into "free".
+    var appcastTier: String {
+        switch self {
+        case .trial: return "trial"
+        case .pro: return "pro"
+        case .proExpired: return "proExpired"
+        case .trialExpired: return "trialExpired"
+        }
+    }
 }

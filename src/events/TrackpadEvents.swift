@@ -2,7 +2,27 @@ import Cocoa
 
 // TODO: underlying content scrolls if both Mission Control and App Expose use 4-finger swipes or are off in Trackpad settings. It doesn't scroll if any of them use 3-finger swipe though.
 class TrackpadEvents {
-    private static var eventTap: CFMachPort!
+    /// Detection. LISTEN-ONLY on purpose: an active tap on `cghidEventTap` makes the WindowServer wait for
+    /// our callback on EVERY gesture event before it processes anything queued behind it — including the
+    /// mouse-moves that carry the cursor. Gesture events flow the whole time a finger is on the trackpad,
+    /// so with one active tap here the cursor's latency was gated on this process for as long as the user
+    /// was touching the trackpad. That is #5911: unusable cursor over the Dock and the menu bar (where you
+    /// point slowly and deliberately), no CPU spike anywhere, and "disabling Gestures fixes it" — which the
+    /// reporter confirmed. Listening costs the WindowServer nothing: it hands us a copy and moves on.
+    private static var detectTap: CFMachPort!
+    /// Absorption. This one IS active, because returning nil is the only way to keep the focused app from
+    /// also acting on the gesture — but it is enabled only while absorbing is possible: the switcher is
+    /// open, or enough fingers are down to trigger. Outside that, nothing in `touchEventHandler` can ever
+    /// return true (verified by reading every path: absorb happens when the session is active, or on the
+    /// single event that fires the trigger), so being absent from the stream changes no behaviour.
+    private static var absorbTap: CFMachPort!
+    private static var absorbTapEnabled = false
+    /// Whether the detection pass wants the current gesture swallowed. Written by `touchEventHandler` and
+    /// read by `absorbTap`'s callback — both on the tap thread — and also cleared from main when the
+    /// session ends (`reset`). That last one is a cross-thread write of a Bool whose only failure mode is
+    /// one extra or one missing swallowed event at a session boundary, the same latitude the pre-existing
+    /// `shouldBeEnabled` takes; a lock here would sit in the input hot path to buy nothing.
+    private static var absorbGestures = false
     private static var shouldBeEnabled: Bool!
     private static var cursorMovedDistance = CGFloat(0.0)
 
@@ -15,18 +35,25 @@ class TrackpadEvents {
     static func toggle(_ enabled: Bool) {
         guard enabled != shouldBeEnabled else { return }
         shouldBeEnabled = enabled
-        if let eventTap {
-            CGEvent.tapEnable(tap: eventTap, enable: enabled)
+        if let detectTap {
+            CGEvent.tapEnable(tap: detectTap, enable: enabled)
         }
+        // The absorbing tap follows the gesture, not the preference: with gestures off nothing can ever ask
+        // for absorption, so leaving it out of the stream is both correct and one less active tap.
+        if !enabled { setAbsorbTapEnabled(false) }
     }
 
     static func reEnableTapIfNeeded() {
-        guard let eventTap, shouldBeEnabled, !CGEvent.tapIsEnabled(tap: eventTap) else { return }
+        guard let detectTap, shouldBeEnabled, !CGEvent.tapIsEnabled(tap: detectTap) else { return }
         Logger.warning { "" }
-        CGEvent.tapEnable(tap: eventTap, enable: true)
+        CGEvent.tapEnable(tap: detectTap, enable: true)
     }
 
     static func reset() {
+        // The session is over, so absorbing is over. Without this the active tap would sit in the stream
+        // until the next trackpad touch re-evaluated it — harmless, but it is exactly the state #5911 is
+        // about, and a session that ends with no finger down is the common case (focus on release).
+        setAbsorbTapEnabled(false)
         ScrollwheelEvents.toggle(false)
         NavigationSwipeDetector.reset()
         NonFreshGestureDetector.reset()
@@ -36,30 +63,64 @@ class TrackpadEvents {
 
     private static func observe_() {
         // CGEvent.tapCreate returns null if ensureAccessibilityCheckboxIsChecked() didn't pass
-        eventTap = CGEvent.tapCreate(
-            tap: .cghidEventTap, // we need raw data
+        // ORDER MATTERS, and it is decided by `tapCreate` order, not by when the runloop source is added
+        // (measured on macOS 26.5 with two taps at the same point: the one created SECOND runs FIRST, and
+        // swapping the `CFRunLoopAddSource` order changed nothing). The absorbing tap consults a verdict
+        // the detecting tap writes, so detection has to run first — i.e. be created LAST. Created the
+        // other way round, `absorbGestures` was always one event stale, which would leak precisely the
+        // event that fires the trigger.
+        absorbTap = CGEvent.tapCreate(
+            tap: .cghidEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: NSEvent.EventTypeMask.gesture.rawValue,
+            callback: absorbEvent,
+            userInfo: nil)
+        detectTap = CGEvent.tapCreate(
+            tap: .cghidEventTap, // we need raw data
+            place: .headInsertEventTap,
+            options: .listenOnly, // see `detectTap`: an active tap here gates the cursor on us (#5911)
+            eventsOfInterest: NSEvent.EventTypeMask.gesture.rawValue,
             callback: handleEvent,
             userInfo: nil)
-        if let eventTap {
-            let runLoopSource = CFMachPortCreateRunLoopSource(nil, eventTap, 0)
+        guard let detectTap, let absorbTap else { App.restart(); return }
+        CGEvent.tapEnable(tap: absorbTap, enable: false)
+        for tap in [absorbTap, detectTap] {
+            let runLoopSource = CFMachPortCreateRunLoopSource(nil, tap, 0)
             CFRunLoopAddSource(BackgroundWork.keyboardAndMouseAndTrackpadEventsThread.runLoop, runLoopSource, .commonModes)
-        } else {
-            App.restart()
         }
     }
 
+    /// Put the absorbing tap in or out of the stream. Called only at gesture boundaries (the finger count
+    /// crossing the trigger threshold, the session opening or closing), never per event: `CGEvent.tapEnable`
+    /// is IPC, and doing it per event would reintroduce exactly the cost this split removes.
+    private static func setAbsorbTapEnabled(_ enabled: Bool) {
+        guard enabled != absorbTapEnabled, let absorbTap else { return }
+        absorbTapEnabled = enabled
+        CGEvent.tapEnable(tap: absorbTap, enable: enabled)
+        if !enabled { absorbGestures = false }
+    }
+
+    /// The active tap: it exists to swallow, so it does nothing else. `absorbGestures` is decided by the
+    /// detection pass on the listen-only tap.
+    private static let absorbEvent: CGEventTapCallBack = { _, type, cgEvent, _ in
+        if type.rawValue == NSEvent.EventType.gesture.rawValue {
+            if absorbGestures { return nil } // focused app won't receive the event
+        } else if (type == .tapDisabledByUserInput || type == .tapDisabledByTimeout), absorbTapEnabled {
+            CGEvent.tapEnable(tap: absorbTap!, enable: true)
+        }
+        return Unmanaged.passUnretained(cgEvent)
+    }
+
+    /// Detection only. Its return value is ignored by the OS (the tap is listen-only); what it decides is
+    /// carried by `absorbGestures`, which the active tap applies.
     private static let handleEvent: CGEventTapCallBack = { _, type, cgEvent, _ in
         if type.rawValue == NSEvent.EventType.gesture.rawValue {
-            if touchEventHandler(cgEvent) {
-                return nil // focused app won't receive the event
-            }
+            absorbGestures = touchEventHandler(cgEvent)
         } else if (type == .tapDisabledByUserInput || type == .tapDisabledByTimeout) && shouldBeEnabled {
-            CGEvent.tapEnable(tap: eventTap!, enable: true)
+            CGEvent.tapEnable(tap: detectTap!, enable: true)
         }
-        return Unmanaged.passUnretained(cgEvent) // focused app will receive the event
+        return Unmanaged.passUnretained(cgEvent)
     }
 
     private static func touchEventHandler(_ cgEvent: CGEvent) -> Bool {
@@ -78,6 +139,11 @@ class TrackpadEvents {
         let activeTouches = touches.filter { !$0.isResting && ($0.phase == .began || $0.phase == .moved) }
         let fingersDown = touches.count { $0.phase == .began || $0.phase == .moved || $0.phase == .stationary }
         let requiredFingers = Preferences.nextWindowGesture.isThreeFinger() ? 3 : 4
+        // Arm the absorbing tap only once absorbing is possible at all. The trigger needs `requiredFingers`
+        // down AND `MIN_SWIPE_DISTANCE` travelled after that, so arming on the finger count lands many
+        // events before the one that has to be swallowed. One- and two-finger use — pointing, scrolling,
+        // the whole of #5911 — never puts an active tap in the HID stream.
+        setAbsorbTapEnabled(SwitcherSession.isActive || fingersDown >= requiredFingers)
         if SwitcherSession.isActive {
             handleEventIfAppIsBeingUsed(fingersDown, activeTouches, requiredFingers)
             return true // absorb the touch event

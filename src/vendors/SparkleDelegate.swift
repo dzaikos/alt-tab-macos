@@ -34,6 +34,7 @@ class SparkleDelegate: NSObject, SPUUpdaterDelegate {
             ["key": "macos", "value": "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"],
             ["key": "arch", "value": Sysctl.run("hw.machine")],
             ["key": "lang", "value": Locale.preferredLanguages.first ?? "unknown"],
+            ["key": "tier", "value": LicenseManager.shared.state.appcastTier],
         ]
     }
 
