@@ -1,3 +1,24 @@
+# [11.5.0](https://github.com/lwouis/alt-tab-macos/compare/v11.4.4...v11.5.0) (2026-08-19)
+
+
+### Bug Fixes
+
+* a window might be missing from the list (closes [#5954](https://github.com/lwouis/alt-tab-macos/issues/5954)) ([d070719](https://github.com/lwouis/alt-tab-macos/commit/d070719))
+* block trackpad gesture trigger after an off-axis gesture ([d348b79](https://github.com/lwouis/alt-tab-macos/commit/d348b79))
+* middle-click on the switcher might mess with other apps ([d26bd38](https://github.com/lwouis/alt-tab-macos/commit/d26bd38)), closes [#5950](https://github.com/lwouis/alt-tab-macos/issues/5950)
+* rare crash at launch when preferences are read before registered ([71734c8](https://github.com/lwouis/alt-tab-macos/commit/71734c8))
+* rare crash when a gesture session ends while fingers are still down ([f5802ad](https://github.com/lwouis/alt-tab-macos/commit/f5802ad))
+* rare crash when activating a license before the ui exists ([6bbe6c4](https://github.com/lwouis/alt-tab-macos/commit/6bbe6c4))
+* trackpad gesture could stop working until relaunch (closes [#5137](https://github.com/lwouis/alt-tab-macos/issues/5137)) ([8ffe344](https://github.com/lwouis/alt-tab-macos/commit/8ffe344))
+* window order might be wrong in some cases (closes [#5936](https://github.com/lwouis/alt-tab-macos/issues/5936)) ([cd32ffd](https://github.com/lwouis/alt-tab-macos/commit/cd32ffd)), closes [#5439](https://github.com/lwouis/alt-tab-macos/issues/5439)
+* wrong window selected with 'non-active apps' (closes [#5941](https://github.com/lwouis/alt-tab-macos/issues/5941)) ([47a206d](https://github.com/lwouis/alt-tab-macos/commit/47a206d))
+
+
+### Features
+
+* app size reduced by half - minimum macos is now 10.14.4 ([b6fdf2c](https://github.com/lwouis/alt-tab-macos/commit/b6fdf2c))
+* refine menubar icons to be pixel-perfect ([20451e0](https://github.com/lwouis/alt-tab-macos/commit/20451e0))
+
 ## [11.4.4](https://github.com/lwouis/alt-tab-macos/compare/v11.4.3...v11.4.4) (2026-08-06)
 
 

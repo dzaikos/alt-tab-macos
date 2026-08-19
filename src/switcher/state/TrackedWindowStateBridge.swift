@@ -52,7 +52,7 @@ class TrackedWindowStateBridge {
         switch input {
         case .windowCreated, .windowDestroyed, .windowMovedOrResized, .windowOrderedIn, .windowOrderedOut,
              .windowFocused, .spaceMembershipChanged, .spaceTransitionStarted, .spaceChangeSettled,
-             .appActivated:
+             .appActivated, .systemReshow:
             return true
         case .discoveryLanded, .titleAndTabsRead, .windowServerStateRead, .spacesSynced,
              .axFocusedWindowRead, .livenessConfirmedDead, .cgsWindowListsRead, .zOrderRead,

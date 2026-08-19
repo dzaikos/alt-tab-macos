@@ -87,16 +87,39 @@ class Applications {
                 // ever strip a group of its claim — the rec24 vanish. `sp[]` means the enumeration and the
                 // per-window query agree the tab is nowhere; a non-empty answer means the tab keeps a stale
                 // Space and the group is never wiped. Logged because the test model has to assume one.
-                backfillProbe.append("#\(wid)→\(spaces)")
-                if !spaces.isEmpty { windowToSpacesMap[wid] = spaces }
+                backfillProbe.append("#\(wid)→\(spaces.map { "\($0)" } ?? "noAnswer")")
+                if let spaces, !spaces.isEmpty { windowToSpacesMap[wid] = spaces }
             }
+            // CORROBORATE the wids both reads left unplaced, because "no Space" is not what an empty answer
+            // means. CGS returns a non-NULL EMPTY array for a wid it has no record of at all (measured on
+            // macOS 26: wid 0, 1, 999999, UINT32_MAX all answer `[]`), so dead-wid, genuinely-unplaced and
+            // failed-read are one value here — and the reducer used to hide the window on all three. A
+            // WindowServer row with a Space type is a SECOND read that disagrees, and a window two OS reads
+            // disagree about is not one to hide: the reducer keeps its last known membership (#5954). One
+            // batched IPC, only for the misses — usually none.
+            //
+            // Deliberately not read as "this window is definitely alive and definitely on a Space". Measured:
+            // the WindowServer keeps a full row, `spaceTypeMask` unchanged, for a window CLOSED while its app
+            // keeps running — so this says "the WindowServer has not forgotten this wid", which is weaker.
+            // It is enough here because it only ever RETAINS a membership CGS itself reported earlier, and
+            // because the strong-signal phantoms it must not resurrect (Joplin / Sprig / `show:false`
+            // Electron) are caught by a separate pipeline that this cannot reach: `cgsWindowListsRead` latches
+            // them from the two CGS window lists, and that latch hides a window whatever its `spaceIds` say.
+            let stillUnplaced = trackedWids.filter { windowToSpacesMap[$0] == nil }
+            let placedByWindowServer = Set(WindowServerQuery.query(stillUnplaced)
+                .filter { $0.spaceTypeMask != 0 }.map { $0.wid })
             Logger.debug { "spacesSync enumerated=\(snapshot.windowToSpacesMap.count)/\(trackedWids.count) "
-                + "perWindowProbe=[\(backfillProbe.joined(separator: " "))]" }
+                + "perWindowProbe=[\(backfillProbe.joined(separator: " "))] "
+                + "unplaced=\(stillUnplaced) wsPlaces=\(placedByWindowServer.sorted())" }
             DispatchQueue.main.async {
                 // apply the topology first (the reducer's snapshot must see the fresh Space⇄index map),
-                // then the per-window backfill + regroup is the reducer's `.spacesSynced` branch
+                // then the per-window backfill + regroup is the reducer's `.spacesSynced` branch.
+                // `queried` is `trackedWids` as captured ABOVE, before the off-main work: windows discovered
+                // while this pass ran were never asked about, and the reducer must not read our silence about
+                // them as "CGS places them nowhere" (see `.spacesSynced`).
                 let topologyChanged = Spaces.applyTopology(snapshot)
                 TrackedWindowStateBridge.dispatch(.spacesSynced(windowToSpaces: windowToSpacesMap,
+                    queried: Set(trackedWids), placedByWindowServer: placedByWindowServer,
                     topologyChanged: topologyChanged))
             }
         }
@@ -205,7 +228,10 @@ class Applications {
             // reflow on the first summon (misaligned space numbers / shifted title). Setting it right here makes
             // that later correction a no-op. Skipped for an adopted inactive tab: the query lies for those
             // (stale old Space), and a background tab's true membership is NO Space.
-            let spaceIds = (isSelf || adoptedAsInactiveTab) ? [CGSSpaceID]() : CGSCallScheduler.windowSpaces(wid)
+            // A nil answer means the query said nothing at all; treated as empty here, exactly as before,
+            // because that is also `Window.init`'s state and the first `syncSpacesState` corroborates it.
+            let spaceIds = (isSelf || adoptedAsInactiveTab) ? [CGSSpaceID]()
+                : (CGSCallScheduler.windowSpaces(wid) ?? [])
             DispatchQueue.main.async { [weak app] in
                 guard let app else { return }
                 windowAttributesThrottler.throttleOrProceed(key: "\(wid)-generic") {

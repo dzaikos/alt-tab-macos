@@ -37,7 +37,10 @@ final class SelectionResolverTests: XCTestCase {
                        bestMatchOnSearchChange: Bool = false,
                        // defaults to "the list is the length it was at the summon", i.e. nothing arrived —
                        // the cases about a window appearing behind the switcher pass the shorter count.
-                       visibleCountAtSummon: Int? = nil) -> SelectionInputs {
+                       visibleCountAtSummon: Int? = nil,
+                       // defaults to the ordinary case: the window the user is on is tile 0. The `Non-active
+                       // apps` cases (F) pass false — there the current window is filtered out of the list.
+                       currentWindowIsDrawn: Bool = true) -> SelectionInputs {
         SelectionInputs(list: list,
                         selectedIndex: selectedIndex,
                         selectedTarget: selectedTarget,
@@ -45,7 +48,8 @@ final class SelectionResolverTests: XCTestCase {
                         visibleCountAtSummon: visibleCountAtSummon ?? list.filter { $0.visible }.count,
                         userPickedSelection: userPickedSelection,
                         restoreDefaultOnSearchClear: restoreDefaultOnSearchClear,
-                        bestMatchOnSearchChange: bestMatchOnSearchChange)
+                        bestMatchOnSearchChange: bestMatchOnSearchChange,
+                        currentWindowIsDrawn: currentWindowIsDrawn)
     }
 
     // MARK: - A. Initial pick (`selectedTarget == nil`)
@@ -316,6 +320,107 @@ final class SelectionResolverTests: XCTestCase {
         // target lookup fails → adapt → selectedIndex=1 in [0,1,2], in range, target was non-nil
         // so the no-target-set branch doesn't trigger; tail returns ensureTargetSet(1).
         XCTAssertEqual(SelectionResolver.decide(i), .ensureTargetSet(1))
+    }
+
+    // MARK: - F. The current window is not in the drawn list (#5941)
+
+    /// F1. `Apps to show: Non-active apps`, the user is on VS Code window V1 and the list draws Chrome's two
+    /// windows. The front tile is ALREADY the window they were on before, so that is where the default
+    /// belongs — stepping over it hands them C2, a window they never asked for.
+    func testInitialPickCurrentWindowFilteredOutLandsOnTheFrontTile() {
+        let list = [w("C1"), w("C2")]
+        let i = inputs(list: list, currentWindowIsDrawn: false)
+        XCTAssertEqual(SelectionResolver.decide(i), .resetThenSelect(0))
+    }
+
+    /// F2. The other half of #5941: having landed on C1, the same shortcut must come BACK to V1. Chrome is
+    /// the active app now, so the list draws VS Code's windows and the front one is V1. Without the fix each
+    /// press walks one window further away and the two-window toggle never returns.
+    func testInitialPickCurrentWindowFilteredOutTogglesBackToWhereItCameFrom() {
+        let list = [w("V1"), w("V2")]
+        let i = inputs(list: list, currentWindowIsDrawn: false)
+        XCTAssertEqual(SelectionResolver.decide(i), .resetThenSelect(0))
+    }
+
+    /// F3. The control for F1, same list shape: while the current window IS drawn (every filter but
+    /// `Non-active apps`), the default still steps over tile 0. This pairing is what pins the fix to the
+    /// flag rather than to the list.
+    func testInitialPickCurrentWindowDrawnStillStepsOverTheFrontTile() {
+        let list = [w("C1"), w("C2")]
+        XCTAssertEqual(SelectionResolver.decide(inputs(list: list)), .resetThenSelect(1))
+    }
+
+    /// F4. One other-app window, current window filtered out — land on it rather than wrapping onto nothing.
+    func testInitialPickCurrentWindowFilteredOutWithASingleTile() {
+        let i = inputs(list: [w("only")], currentWindowIsDrawn: false)
+        XCTAssertEqual(SelectionResolver.decide(i), .resetThenSelect(0))
+    }
+
+    /// F5. Newcomers are still stepped over when the current window is filtered out: a window created and
+    /// focused behind the switcher takes tile 0 and pushes the window the user summoned for to tile 1. The
+    /// two rules compose — one steps over what ARRIVED, the other over the window you are ON.
+    func testInitialPickStepsOverANewcomerEvenWhenTheCurrentWindowIsFilteredOut() {
+        let list = [w("new", appearedAfterSummon: true), w("previous"), w("other")]
+        let i = inputs(list: list, visibleCountAtSummon: 2, currentWindowIsDrawn: false)
+        XCTAssertEqual(SelectionResolver.initialPickIndex(i), 1)
+    }
+
+    /// F6. …and a newcomer that REPLACED a window that left keeps the pick on the front tile, since the list
+    /// never grew. Same replacement rule as with the current window drawn, one tile earlier.
+    func testInitialPickDoesNotStepOverAReplacementWhenTheCurrentWindowIsFilteredOut() {
+        let list = [w("incoming", appearedAfterSummon: true), w("previous"), w("other")]
+        let i = inputs(list: list, visibleCountAtSummon: 3, currentWindowIsDrawn: false)
+        XCTAssertEqual(SelectionResolver.initialPickIndex(i), 0)
+    }
+
+    /// F7. Every drawn window arrived after the summon, so there is no as-of-the-summon list to answer from.
+    /// The fallback must still respect the flag: land on the front tile, never on nothing.
+    func testInitialPickFallsBackToTheFrontTileWhenSteppingOverLeavesNothing() {
+        let list = [w("a", appearedAfterSummon: true), w("b", appearedAfterSummon: true)]
+        let i = inputs(list: list, visibleCountAtSummon: 0, currentWindowIsDrawn: false)
+        XCTAssertEqual(SelectionResolver.initialPickIndex(i), 0)
+    }
+
+    /// F8. Hidden rows sit in the MRU ahead of the first DRAWN tile (a grouped background tab). The pick
+    /// counts drawn tiles, so it lands on the first drawn one, not on raw index 0.
+    func testInitialPickCurrentWindowFilteredOutCountsDrawnTilesNotIndexes() {
+        let list = [w("groupedTab", visible: false), w("C1"), w("C2")]
+        let i = inputs(list: list, currentWindowIsDrawn: false)
+        XCTAssertEqual(SelectionResolver.decide(i), .resetThenSelect(1))
+    }
+
+    /// F9. `Window order: Alphabetical` never counted tiles in the first place — it picks the most recently
+    /// focused drawn window, which is already the right answer when the current window is filtered out. The
+    /// flag must leave that path alone.
+    func testInitialPickLastFocusedRuleIsUnaffectedByTheFlag() {
+        let list = [w("a", focusOrder: 5), w("b", focusOrder: 0), w("c", focusOrder: 3)]
+        let drawn = inputs(list: list, useLastFocusedRule: true)
+        let filtered = inputs(list: list, useLastFocusedRule: true, currentWindowIsDrawn: false)
+        XCTAssertEqual(SelectionResolver.decide(drawn), .resetThenSelect(1))
+        XCTAssertEqual(SelectionResolver.decide(filtered), .resetThenSelect(1))
+    }
+
+    /// F10. Clearing a search query restores the default pick, and the restored default is the #5941 one.
+    func testSearchRestoreDefaultOnClearHonorsTheFilteredOutCurrentWindow() {
+        let list = [w("C1"), w("C2"), w("C3")]
+        let i = inputs(list: list, selectedIndex: 2, selectedTarget: "C3",
+                       restoreDefaultOnSearchClear: true, currentWindowIsDrawn: false)
+        XCTAssertEqual(SelectionResolver.decide(i), .resetThenSelect(0))
+    }
+
+    /// F11. Once the USER has moved the selection it is a commitment, followed by id however the list
+    /// reorders (#5665). The flag only ever answers where the DEFAULT starts.
+    func testUserPickedTargetIsFollowedWhenTheCurrentWindowIsFilteredOut() {
+        let list = [w("C1"), w("C2"), w("C3")]
+        let i = inputs(list: list, selectedIndex: 2, selectedTarget: "C3", currentWindowIsDrawn: false)
+        XCTAssertEqual(SelectionResolver.decide(i), .selectAt(2))
+    }
+
+    /// F12. The both-top-minimized edge lands on tile 0 either way — it never stepped over anything.
+    func testInitialPickTopTwoMinimizedIsUnaffectedByTheFlag() {
+        let list = [w("a", minimized: true), w("b", minimized: true), w("c")]
+        let i = inputs(list: list, currentWindowIsDrawn: false)
+        XCTAssertEqual(SelectionResolver.decide(i), .resetThenSelect(0))
     }
 
     // MARK: - Helper kernel functions

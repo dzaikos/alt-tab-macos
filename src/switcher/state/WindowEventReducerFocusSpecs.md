@@ -80,3 +80,59 @@ rather than dropped. These two pin the reducer end: the kernel only learns the t
 - **testFocusingANonMinimizedWindowStillLetsTheSiblingsFocusBump** — the counterfactual that keeps #5785
   safe: the same tail against a non-minimized target still bumps, because there no tail was caused. The two
   behaviours differ only by whether AltTab had to deminiaturize.
+
+### D. The desktop being put back (#5936)
+
+An order-in of the active app's window is read as a raise, because the native Cmd+` emits nothing else.
+Three OS gestures break that reading, all with the same signature: every window of every app ordered in
+inside one millisecond, and — unlike a Space re-show, an un-hide or a fullscreen exit — **no order-out
+first**, so `offScreen` is empty and `cameBackOnScreen` cannot tell a re-show from a raise. Measured live
+(macOS 26, 2026-08-12), each with the lag from its own signal to the burst:
+
+| trigger | signal | lag | mute | notes |
+|---|---|---|---|---|
+| Mission Control / App Exposé | `AXExposeShowAllWindows` (Dock AX) | 12-106ms | 0.5s | the common one; caught doing the full damage |
+| display wake / unlock | `screensDidWake` / `screenIsUnlocked` | 2.03s (×3) | 3s | only bites on a Mac that does not lock |
+| display reconfiguration | `didChangeScreenParameters` | ~500ms | 1.5s | was surviving on luck inside `inSpaceTransition`, once by 28ms |
+
+`WindowEventReducer.systemReshowMute(source)` sizes each mute for its own trigger, 3-5x that trigger's lag,
+armed from `DockEvents`, `SleepWakeEvents` / `ScreenLockEvents` and `ScreensEvents`. One 3s window for all
+three put the cost where users meet it: dismiss Mission Control, cycle windows a beat later, and the raise
+lands inside a mute sized for a wake that never happened.
+
+The wake case only bites where the screen does not lock: with loginwindow holding the front, the
+app-is-active guard already swallows the burst. Mission Control has no such accidental cover, which is why
+it is the trigger that reproduces on any Mac, at any time of day, with no idling involved.
+
+- **testTheWakeBurstDoesNotReorderTheMru** — the measured burst against an interleaved MRU: no window is
+  re-fronted and the order is untouched. Without the mute the active app's windows walk to the top in burst
+  order, which is the report ("all my Chrome windows are at the front", after only stepping away).
+- **testTheMissionControlBurstDoesNotReorderTheMru** — the capture that showed the damage in full: the
+  frontmost app's three windows, at MRU 0, 2 and 3, all re-fronted 12ms after the Dock notification with
+  nothing else in flight. Same rule, the trigger users actually hit.
+
+Under the signals sits a BACKSTOP that needs none of them (`reshowBurstGap`, 5ms): a raise moves one window,
+a re-show moves all of them at once, so an order-in landing within 5ms of an order-in for a DIFFERENT window
+does not bump. It covers the race the signals cannot promise to win — both the Dock notification and the
+burst reach the main queue by `async`, and three of ten measured rounds had them in the same millisecond —
+and any re-show trigger nobody has wired a signal for. It cannot judge a burst's FIRST member, which is the
+harmless one (the frontmost app's front window, at MRU 0 in both captures).
+
+- **testABurstIsCaughtByItsShapeWithNoSignalArmed** — the same burst with nothing armed: the first member
+  keeps the front it already had, the rest do not move.
+- **testALoneOrderInStillBumps** — Cmd+` keeps working: an order-in arriving alone bumps, 200ms being under
+  the fastest human action ever captured (219ms).
+- **testTheSameWindowTwiceIsNotABurst** — one window reported twice in an instant is not two windows; that
+  is the shape of every genuine focus, whose 808 and 815 land together.
+- **testAnUntrackedWidCountsAsBurstEvidence** — the record covers the whole order-in stream, tracked or not,
+  since a burst with holes in it stops looking like a burst.
+- **testAnInAppRaiseStillBumpsOnceTheMuteExpired** — time-bounded, because the signal it stands in front of
+  is real: past the window, an order-in is a Cmd+` raise again.
+- **testAnInAppRaiseASecondAfterMissionControlStillBumps** / **testTheWakeMuteStillCoversItsOwnLateBurst** —
+  the pair that pins the per-source sizing from both ends: a raise 1s after Mission Control bumps, while a
+  burst 2.03s after a wake does not. A single 3s mute fails the first; a single 0.5s mute fails the second.
+- **testAFocusEventDuringTheMuteStillBumps** — only the order-in path is muted. An 808 is the OS stating a
+  focus rather than us inferring one, and the burst contains none.
+- **testRestoringAMinimizedWindowDuringTheMuteStillBumps** — an un-minimize is spared, as it is spared the
+  `cameBackOnScreen` exclusion: a wake leaves minimized windows minimized, and a Dock restore inside the
+  frontmost app emits ONLY that order-in, so a swallowed bump would never be corrected (#5439).

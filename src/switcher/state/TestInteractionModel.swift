@@ -551,6 +551,11 @@ struct TestInteractionModel {
         // event list is built instead let the Space re-query name a wid the show itself was still
         // discovering — the group would never look lost, which is precisely the rec24 gap.
         let trackedActives = Set(world.filter { $0.tabs[$0.activeTab].tracked }.map { $0.activeWid })
+        // The wids `syncSpacesState` captures for its per-window backfill: every window AltTab tracks AT THIS
+        // MOMENT — background tabs and stale wids included, since the app asks about its whole list. Snapshot
+        // it here with `trackedActives`, for the same reason: a window this show is still discovering was
+        // never asked about, so the answer must say nothing about it (`.spacesSynced`'s `queried`).
+        let queriedWids = Set(world.flatMap { w in (w.tabs + w.staleWids).filter { $0.tracked }.map { $0.wid } })
         // discover untracked ACTIVE tabs (the incoming active minted on a switch). Background tabs and stale
         // wids need no adoption here — they were tracked when active and REMAIN tracked (Space-less, retained
         // by Finder), and reconcile folds them; that is the accumulation, not a re-adoption.
@@ -617,7 +622,17 @@ struct TestInteractionModel {
         // and that query still reports a backgrounded tab's OLD Space. Emitting one anyway asked the reducer
         // to converge from "every tracked window is Space-less at once", a state it never actually sees.
         if !spaceMap.isEmpty {
-            e.readUnits.append([.input(.spacesSynced(windowToSpaces: spaceMap, topologyChanged: false))])
+            // You cannot hold an answer about a window you never asked about: every wid the map places was
+            // tracked when the pass captured its list. Asserted because `queriedWids` is otherwise pinned by
+            // nothing — the scenarios pass with it set to every wid or to none, so a model that quietly stops
+            // asking would keep every corpus test green while the re-query decided nothing at all.
+            assert(spaceMap.keys.allSatisfy { queriedWids.contains($0) },
+                "the model answered about \(spaceMap.keys.filter { !queriedWids.contains($0) }), which it never queried")
+            // `placedByWindowServer` is empty: in the model the two OS reads never contradict each other, so
+            // every unplaced wid is a confirmed empty. The contradiction is a live-OS anomaly (#5954) with no
+            // recording to model it — inventing one would grade changes against a world we have not observed.
+            e.readUnits.append([.input(.spacesSynced(windowToSpaces: spaceMap, queried: queriedWids,
+                placedByWindowServer: [], topologyChanged: false))])
         }
         // phantom pass: active tabs on the visible Space are VISIBLE; every wid is in ALL (Finder retains
         // the windows). The order of THIS vs the title/sync reads is exactly the rec24c/rec24e race the

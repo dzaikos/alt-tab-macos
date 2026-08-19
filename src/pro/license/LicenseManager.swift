@@ -114,15 +114,18 @@ class LicenseManager {
                     if let variantId = response.variantId {
                         writes.append((Self.keychainVariantAccount, variantId))
                     }
-                    var attempted: [String] = []
+                    var written: [String] = []
                     for (account, value) in writes {
                         let status = self.keychain.setValue(value, account: account)
-                        attempted.append(account)
                         if status != errSecSuccess {
-                            attempted.forEach { self.keychain.remove(account: $0) }
+                            // Only roll back what this activation actually wrote. A failed write left the
+                            // previous value in place, so removing that account would delete a license we
+                            // never wrote, which is the exact loss `setValue` avoids by not deleting.
+                            written.forEach { self.keychain.remove(account: $0) }
                             completion(.failure(LicenseAPIError.keychainWriteFailed(account: account, status: status)))
                             return
                         }
+                        written.append(account)
                     }
                     self.defaults.set(self.clock.now.timeIntervalSince1970, forKey: "lastValidation")
                     self.defaults.set(true, forKey: "lastValidationResult")

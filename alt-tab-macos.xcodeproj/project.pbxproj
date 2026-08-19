@@ -39,6 +39,9 @@
 		5E1EC110000000000000C002 /* SelectionResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E1EC110000000000000C001 /* SelectionResolver.swift */; };
 		5E1EC110000000000000C003 /* SelectionResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E1EC110000000000000C001 /* SelectionResolver.swift */; };
 		5E1EC110000000000000C102 /* SelectionResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E1EC110000000000000C101 /* SelectionResolverTests.swift */; };
+		5E9E570000000000000F1002 /* GestureTriggerKernel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E9E570000000000000F1001 /* GestureTriggerKernel.swift */; };
+		5E9E570000000000000F1003 /* GestureTriggerKernel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E9E570000000000000F1001 /* GestureTriggerKernel.swift */; };
+		5E9E570000000000000F1102 /* GestureTriggerKernelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E9E570000000000000F1101 /* GestureTriggerKernelTests.swift */; };
 		5EA8E110000000000000F002 /* AxQueryRouting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EA8E110000000000000F001 /* AxQueryRouting.swift */; };
 		5EA8E110000000000000F003 /* AxQueryRouting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EA8E110000000000000F001 /* AxQueryRouting.swift */; };
 		5EA8E110000000000000F102 /* AxQueryRoutingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EA8E110000000000000F101 /* AxQueryRoutingTests.swift */; };
@@ -439,6 +442,8 @@
 		5883F0A729A5182C0071DB65 /* TrackpadEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackpadEvents.swift; sourceTree = "<group>"; };
 		5E1EC110000000000000C001 /* SelectionResolver.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SelectionResolver.swift; sourceTree = "<group>"; };
 		5E1EC110000000000000C101 /* SelectionResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionResolverTests.swift; sourceTree = "<group>"; };
+		5E9E570000000000000F1001 /* GestureTriggerKernel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GestureTriggerKernel.swift; sourceTree = "<group>"; };
+		5E9E570000000000000F1101 /* GestureTriggerKernelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GestureTriggerKernelTests.swift; sourceTree = "<group>"; };
 		5EA8E110000000000000F001 /* AxQueryRouting.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AxQueryRouting.swift; sourceTree = "<group>"; };
 		5EA8E110000000000000F101 /* AxQueryRoutingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AxQueryRoutingTests.swift; sourceTree = "<group>"; };
 		5C5A1100000000000000A001 /* WsEventRouting.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = WsEventRouting.swift; sourceTree = "<group>"; };
@@ -925,6 +930,8 @@
 				BF0C8643F524515224BF1618 /* KeyboardEventsTestable.swift */,
 				BF0C899905524253DC170B56 /* KeyboardEventsTests.swift */,
 				5883F0A729A5182C0071DB65 /* TrackpadEvents.swift */,
+				5E9E570000000000000F1001 /* GestureTriggerKernel.swift */,
+				5E9E570000000000000F1101 /* GestureTriggerKernelTests.swift */,
 				BF0C8FAF34022E23582797F3 /* ScrollwheelEvents.swift */,
 				BF0C81DD40D5AAD9B7C09028 /* CursorEvents.swift */,
 				BF0C8C69316EAAF6DC9AE391 /* CliEvents.swift */,
@@ -1980,6 +1987,8 @@
 				5F882F382EC3C63400110A9F /* CustomRecorderControlTestable.swift in Sources */,
 				BF0C81FA62D810342F59291A /* AppearanceTests.swift in Sources */,
 				5EA8E110000000000000F003 /* AxQueryRouting.swift in Sources */,
+				5E9E570000000000000F1002 /* GestureTriggerKernel.swift in Sources */,
+				5E9E570000000000000F1102 /* GestureTriggerKernelTests.swift in Sources */,
 				5EA8E110000000000000F102 /* AxQueryRoutingTests.swift in Sources */,
 				5C5A1100000000000000A003 /* WsEventRouting.swift in Sources */,
 				5C5A1100000000000000A102 /* WsEventRoutingTests.swift in Sources */,
@@ -2189,6 +2198,7 @@
 				D04BA8757C9F20F25EB50785 /* TextField.swift in Sources */,
 				5F21C9E02C6E94240091F72F /* ShortcutsWhenActiveSheet.swift in Sources */,
 				5EA8E110000000000000F002 /* AxQueryRouting.swift in Sources */,
+				5E9E570000000000000F1003 /* GestureTriggerKernel.swift in Sources */,
 				5C5A1100000000000000A002 /* WsEventRouting.swift in Sources */,
 				5CAF00000000000000000002 /* ActivationFocusResolver.swift in Sources */,
 				5C5A1100000000000000B002 /* WsWindowState.swift in Sources */,

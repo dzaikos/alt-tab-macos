@@ -35,6 +35,68 @@ enum WindowEventReducer {
     static let holdReleaseMaxAttempts = 50
     static let dragOutMaxAttempts = 8
 
+    /// How long after the OS announces it is putting the desktop back an order-in stops counting as a raise.
+    /// Three things do it, and all three emit the SAME burst: every window of every app ordered in inside one
+    /// millisecond, with **no order-out in front of it**. So `offScreen` is empty, `cameBackOnScreen` is
+    /// false, and the burst reaches the raise rule looking exactly like N× Cmd+`: every window of the active
+    /// app re-fronts, in burst order, and that app's whole set lands at the top of the MRU scrambled (#5936 —
+    /// "all my Chrome windows are at the front, even though I haven't switched to some of them").
+    ///
+    /// Measured live, macOS 26, 2026-08-12, with the lag from each trigger's own signal to the burst:
+    /// - **Mission Control / App Exposé** (`AXExposeShowAllWindows`, Dock AX): **12-106ms**. Captured doing
+    ///   the damage in full — three Finder windows at MRU 0, 3 and 4 all re-fronted by opening Mission
+    ///   Control once. Nothing else was in flight: no Space transition, no activation, no lock, no sleep.
+    ///   This is the common trigger; the two below are the rare ones.
+    /// - **Display wake / session unlock**: **2.03s** (three captures: 2.03, 2.03, 2.01), the notification
+    ///   firing when the display powers on and the re-show when the WindowServer gets to it. It only bites on
+    ///   a Mac that does not lock: with loginwindow holding the front, the app-is-active guard swallows it.
+    /// - **Display reconfiguration** (plug/unplug, resolution): **~500ms**, twice. This one was already
+    ///   surviving on luck — both bursts landed inside the 0.5s `inSpaceTransition` window, one of them by
+    ///   28ms, and that margin is not a guarantee under load.
+    ///
+    /// Each mute is sized for ITS OWN trigger — roughly 3-5x that trigger's measured lag — rather than all
+    /// three taking the slowest one's 3s. The cost of a mute is a genuine Cmd+` raise swallowed inside it,
+    /// and a single 3s window put that cost where users would actually meet it: dismiss Mission Control,
+    /// cycle windows a beat later, and the raise lands ~2s into a mute sized for a wake that never happened.
+    /// Sized per source, the Mission Control mute is over before its own gesture finishes.
+    ///
+    /// The risk stays asymmetric in the same direction as the activation mute's: too short brings the
+    /// scrambled MRU back, too long costs a raise the next focus signal corrects. Hence 3-5x rather than 1.5x.
+    ///
+    /// Only the order-in path is muted, not the 808 path: an 808 is the OS stating a focus, the bursts
+    /// contain none (measured), and swallowing one would lose the first window the user genuinely picks.
+    static func systemReshowMute(_ source: ReshowSource) -> TimeInterval {
+        switch source {
+        case .missionControl: return 0.5   // burst at 12-106ms
+        case .screens: return 1.5          // burst at ~500ms
+        case .wake: return 3               // burst at 2.03s
+        }
+    }
+
+    /// The BACKSTOP under `systemReshowMute`, for the same bursts reached from the other side: a raise moves
+    /// ONE window, a re-show moves all of them at once, so an order-in that lands within this gap of an
+    /// order-in for a DIFFERENT window is a burst member and does not bump.
+    ///
+    /// It exists because the mute depends on winning a race it cannot be guaranteed to win. Both halves reach
+    /// main by `async` — the Dock's Mission Control notification from `missionControlThread`, the burst from
+    /// the WindowServer's own thread — so their order is enqueue order, not causality. Measured over 10
+    /// hot-corner rounds the mute armed first every time, but three of those had the burst inside the SAME
+    /// millisecond. This rule needs no signal at all, so it also covers whatever re-shows the desktop without
+    /// one (Stage Manager and fast user switching are the untested candidates).
+    ///
+    /// The FIRST member of a burst is never caught: until a second order-in arrives nothing separates it from
+    /// a genuine raise. That is not the damaging half — it is the frontmost app's front window, normally
+    /// already at MRU 0 (both captures) — while members 2..N are the ones that walk an app's whole set to the
+    /// top.
+    ///
+    /// 5ms is two orders of magnitude clear on BOTH sides: consecutive events inside a burst are ~0.12ms
+    /// apart, and the fastest human action in any capture is 219ms (#5785's alt-tab pair). Note this asks
+    /// whether a burst is HAPPENING, not whether one has ENDED — the question that has no answer at any
+    /// threshold, and that sank the activation-mute burst-shape attempt (see `systemReshowMute` and #5596).
+    /// Failing to recognise a burst leaves today's behaviour; recognising one wrongly costs a swallowed raise,
+    /// which the next focus signal corrects.
+    static let reshowBurstGap: TimeInterval = 0.005
+
     // MARK: - the reducer entry point
 
     /// Evolve the state by one input and return the effects to execute. Covers what `WindowServerEvents.route`
@@ -116,6 +178,9 @@ enum WindowEventReducer {
             return spaceChangeSettled(&state)
         case .appActivated(let pid, let now, let altTabTargetWid):
             return appActivated(&state, pid: pid, now: now, altTabTargetWid: altTabTargetWid)
+        case .systemReshow(let now, let source):
+            state.carried.systemReshowMuteUntil = now + systemReshowMute(source)
+            return []
         case .discoveryLanded(let wid, let accepted, let newlyTracked, let adoptedAsInactiveTab, let queriedSpaceIds, let tabTitles):
             return discoveryLanded(&state, wid: wid, accepted: accepted, newlyTracked: newlyTracked,
                 adoptedAsInactiveTab: adoptedAsInactiveTab, queriedSpaceIds: queriedSpaceIds, tabTitles: tabTitles)
@@ -126,8 +191,9 @@ enum WindowEventReducer {
             return axFocusedWindowRead(&state, wid: wid, viaActivationBackstop: viaActivationBackstop)
         case .windowServerStateRead(let snapshots):
             return windowServerStateRead(&state, snapshots)
-        case .spacesSynced(let windowToSpaces, let topologyChanged):
-            return spacesSynced(&state, windowToSpaces: windowToSpaces, topologyChanged: topologyChanged)
+        case .spacesSynced(let windowToSpaces, let queried, let placedByWindowServer, let topologyChanged):
+            return spacesSynced(&state, windowToSpaces: windowToSpaces, queried: queried,
+                placedByWindowServer: placedByWindowServer, topologyChanged: topologyChanged)
         case .livenessConfirmedDead(let wid):
             // A CLOSE the OS confirmed twice: the cached element died AND the app no longer lists the wid
             // among its windows (`removeIfClosedAfterOrderOut`, which keeps the window on a stale-ref-only
@@ -165,6 +231,15 @@ enum WindowEventReducer {
         // Consumed here whatever we decide below, and for untracked wids too, so the set stays self-draining
         // and mirrors the WindowServer's own on-screen bit rather than accumulating our interpretation of it.
         let cameBackOnScreen = orderedIn && state.carried.offScreen.remove(wid) != nil
+        // Recorded before anything can return, and for untracked wids too, so the pair describes the WHOLE
+        // order-in stream — a burst is only recognisable as one if nothing in it is missing from the record.
+        var isReshowBurstMember = false
+        if orderedIn {
+            isReshowBurstMember = now - state.carried.lastOrderInAt < reshowBurstGap
+                && state.carried.lastOrderInWid != wid
+            state.carried.lastOrderInAt = now
+            state.carried.lastOrderInWid = wid
+        }
         if let window = state.window(wid) {
             var effects: [ReducerEffect] = [.queryWindowServerState(wids: [wid], throttled: true)]
             if orderedIn {
@@ -247,6 +322,18 @@ enum WindowEventReducer {
                    !inSpaceTransition,
                    !state.recentlyCreated.contains(wid),
                    state.apps[window.pid]?.isActive == true,
+                   // The OS is putting the desktop back rather than the user raising a window: either it said
+                   // so (`systemReshowMute`, armed by Mission Control / a wake / a display change) or the
+                   // shape says so (`reshowBurstGap`, this order-in arriving alongside another window's).
+                   // The two are deliberately redundant: the signal is precise but has to win a race, the
+                   // shape needs no signal but cannot judge a burst's first member.
+                   //
+                   // An UN-MINIMIZE is spared both, exactly as it is spared the `cameBackOnScreen` exclusion
+                   // just above: a re-show puts back the windows that were on screen and leaves the minimized
+                   // ones minimized, so a window our own model watched leave the minimized state is a raise
+                   // whatever else is in flight — and a Dock restore inside the app that is already frontmost
+                   // emits ONLY this 815, with nothing behind it to correct a swallowed bump (#5439).
+                   unminimized || (now >= state.carried.systemReshowMuteUntil && !isReshowBurstMember),
                    // Time-bounded, NOT "does the snapshot still hold candidates": the raise tail's 815s
                    // arrive after its 808s have consumed every snapshotted wid, so a DRAINED snapshot is not
                    // evidence the storm is over. Measured live on Finder — gating on `wids` let the
@@ -1062,14 +1149,38 @@ enum WindowEventReducer {
         return effects
     }
 
-    /// The off-main Spaces re-query landed (the apply-side of `Applications.syncSpacesState`): backfill
-    /// every tracked window's Space membership from the authoritative map, then regroup if anything moved.
+    /// The off-main Spaces re-query landed (the apply-side of `Applications.syncSpacesState`): backfill the
+    /// Space membership of every window the query ASKED about, then regroup if anything moved.
+    ///
+    /// Windows outside `queried` are skipped, and that is the whole point of the parameter: they entered the
+    /// model after the pass captured its wid list, so this answer says nothing about them (see the input's
+    /// doc). Applying `[]` to them anyway asserted "CGS places this window nowhere" about a window nobody had
+    /// asked about — the strong phantom signal — so a window discovered during the off-main query was hidden
+    /// despite its own discovery having just read its Space correctly.
+    ///
+    /// UNLESS the map places it anyway, in which case we hold an answer and it would be daft to drop it. The
+    /// map is NOT built from `queried`: `Spaces.query` enumerates every Space and takes whatever windows CGS
+    /// lists (the same call the summon's discovery sweep reads), so a window appended mid-flight usually IS in
+    /// it, and it is the fresher fact — a discovery whose own per-window query came back empty leaves the
+    /// window on `Window.init`'s current-Space GUESS, which is wrong the moment the window is on another
+    /// Space. Only SILENCE is ambiguous; an answer is an answer whoever it was asked for.
     private static func spacesSynced(_ state: inout TrackedWindowState, windowToSpaces: [CGWindowID: [UInt64]],
+                                     queried: Set<CGWindowID>, placedByWindowServer: Set<CGWindowID>,
                                      topologyChanged: Bool) -> [ReducerEffect] {
         var effects = [ReducerEffect]()
         var changed = topologyChanged
         for w in state.windows {
-            guard let wid = w.wid else { continue }
+            guard let wid = w.wid, queried.contains(wid) || windowToSpaces[wid] != nil else { continue }
+            // Two OS reads disagree: CGS named no Space for this wid, the WindowServer says it is on one.
+            // An empty CGS answer is also what a wid it has never heard of returns, so on its own it cannot
+            // carry the weight the strong phantom signal puts on it. Keep the last membership CGS itself
+            // reported — stale at worst, and the window stays reachable instead of disappearing with no way
+            // back (#5954). The wids the WindowServer does NOT know fall through and are wiped as before;
+            // those are the corpses, and `discardDeadPhantomWindows` removes them outright.
+            if windowToSpaces[wid] == nil, placedByWindowServer.contains(wid) {
+                effects.append(.log("spacesSync keepPlaced #\(wid) sp\(w.spaceIds) (WindowServer places it, CGS named none)"))
+                continue
+            }
             let r = state.applyWindowSpaces(wid, spaceIds: windowToSpaces[wid] ?? [])
             effects.append(.updateScreenId(wid))
             if r.unphantomedRealWindow { effects.append(.removeWindowlessPlaceholder(pid: w.pid)) }

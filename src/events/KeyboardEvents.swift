@@ -56,7 +56,12 @@ class KeyboardEvents {
             // outside: the symptom is "Esc does nothing and the switcher is stuck", and nothing in the
             // log said a tap had died. `byTimeout` means our own callback was too slow — the main thread
             // was busy — and it is the one worth chasing; `byUserInput` is macOS being defensive.
-            Logger.info { type == .tapDisabledByTimeout ? "byTimeout" : "byUserInput" }
+            //
+            // Both taps share this callback, so say whether the Esc tap was even wanted on. Without
+            // that, the expected case reads alarming: `byUserInput` fires once per summon, as the tap we
+            // just disabled ourselves at session end goes away, and 266 such lines in one session look
+            // like macOS fighting us when nothing is being re-enabled at all.
+            Logger.info { "\(type == .tapDisabledByTimeout ? "byTimeout" : "byUserInput") wantEscapeTap:\(anyShortcutUsesEscape && SwitcherSession.isActive)" }
             reEnableTapIfNeeded()
             return Unmanaged.passUnretained(cgEvent)
         default:

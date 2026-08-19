@@ -224,6 +224,22 @@ final class LicenseManagerTests: XCTestCase {
         XCTAssertNil(keychain.value(account: LicenseManager.keychainInstanceAccount))
     }
 
+    func testActivateFailureKeepsAnAlreadyStoredLicense() {
+        setupActivatedLicense(variantId: "pro")
+        manager.initialize()
+        api.activateResult = .success(ActivateResult(instanceId: "inst-2", variantId: "pro", customerEmail: nil))
+        // Re-activating with a different key on a machine whose keychain stopped accepting writes.
+        keychain.setValueStatus = { _ in errSecAuthFailed }
+        let exp = expectation(description: "activate")
+        manager.activate("LICENSE-KEY-XYZ") { _ in exp.fulfill() }
+        wait(for: [exp], timeout: 1)
+        // The rollback must not delete what the failed write left untouched.
+        XCTAssertEqual(keychain.value(account: LicenseManager.keychainKeyAccount), "LICENSE-ABC")
+        XCTAssertEqual(keychain.value(account: LicenseManager.keychainInstanceAccount), "instance-1")
+        XCTAssertEqual(keychain.value(account: LicenseManager.keychainVariantAccount), "pro")
+        XCTAssertEqual(manager.state, .pro)
+    }
+
     func testDeactivateInstanceCallsApiWithoutTouchingLocalState() {
         setupActivatedLicense(variantId: nil)
         manager.initialize()

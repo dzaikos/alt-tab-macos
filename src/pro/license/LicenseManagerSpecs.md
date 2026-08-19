@@ -27,6 +27,7 @@ It is built from three injected collaborators so the logic is testable without r
 - **Trial length is 14 days, 0-indexed internally.** Day 0 = first launch → `.trial(14)`; day 13 → `.trial(1)`; day 14 → `.trialExpired`. The trial start is persisted on first launch and **never reset** on relaunch.
 - **No grace period.** `isProLocked` is true the instant the trial expires — degradable Pro prefs downgrade immediately (this pairs with `ProTransitionManager.onProLockEngaged()`).
 - **Keychain writes are all-or-nothing.** Activation writes key + instance + variant; if **any** write fails, every prior write is rolled back, validation timestamps are *not* written, and the state stays `.trial` — never a half-activated `.pro`. This is the most important invariant in the file.
+- **A failed keychain write leaves the previous value intact.** `SystemKeychain.setValue` updates in place and never deletes first, so a machine that stops accepting writes (locked or password-drifted login keychain) keeps the license it already had instead of losing it. `MockKeychain` models the same contract, so the rollback above can only ever remove values *this* activation wrote.
 - **Defensive expiry.** A license present in the keychain but with `lastValidationResult` missing or `false` resolves to `.trialExpired`, not `.pro`.
 - **Revalidation is throttled.** `initialize()` dispatches an async revalidation only if `lastValidation` is older than the interval (~30 days). Within the interval it's skipped (no network call). Network failure preserves state and the old timestamp; a valid result refreshes the timestamp and variant; an invalid result flips to `.trialExpired`.
 - **State is computed synchronously on `initialize()`** from defaults+keychain; async revalidation may then update it on the main queue.
@@ -62,6 +63,7 @@ Mirrors `LicenseManagerTests.swift` 1:1. Each test uses an isolated `UserDefault
 - **testActivateSeatLimitExceededSurfacesInstances** — seat-limit error surfaces the list of active instances (id + machineName) to the caller; state unchanged, nothing written.
 - **testActivateFailsAndRollsBackIfKeychainWriteFails** — API success but first keychain write fails → `keychainWriteFailed` surfaced, state stays `.trial`, nothing left in keychain, no validation/email written.
 - **testActivateRollsBackPartialKeychainWritesOnLaterFailure** — first write succeeds, second fails → rollback removes the first write too; state stays `.trial`.
+- **testActivateFailureKeepsAnAlreadyStoredLicense** — re-activating on a machine that already has a license, with a keychain that refuses writes → the stored key/instance/variant are all still there and state stays `.pro`; the rollback only removes what this activation wrote.
 - **testDeactivateInstanceCallsApiWithoutTouchingLocalState** — deactivating *another machine's* instance calls the API but leaves local keychain + `.pro` state intact.
 
 ### E. Deactivate

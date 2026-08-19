@@ -19,7 +19,7 @@ struct SelectionWindow: Equatable {
     /// selection: measured 2ms in which a genuine newcomer was present but not yet marked. Derived from the
     /// summon snapshot there is nothing to race.
     ///
-    /// Being a newcomer is not on its own a reason to step over it — see `secondVisibleIndexAsOfSummon`,
+    /// Being a newcomer is not on its own a reason to step over it — see `defaultPickIndexAsOfSummon`,
     /// which only does so for the ones that lengthened the list rather than replaced a window that left it.
     var appearedAfterSummon = false
 }
@@ -33,13 +33,34 @@ struct SelectionInputs: Equatable {
     /// AND `Applications.frontmostPid != nil`. Gates the alpha/space-ordering initial-pick path.
     let useLastFocusedRule: Bool
     /// How many windows were VISIBLE when the shortcut was pressed. Compared against the visible count now,
-    /// it says how many of the newcomers actually lengthened the list — see `secondVisibleIndexAsOfSummon`.
+    /// it says how many of the newcomers actually lengthened the list — see `defaultPickIndexAsOfSummon`.
     let visibleCountAtSummon: Int
     /// True once the user moved the selection themselves. Until then `selectedTarget` is merely where the
     /// DEFAULT landed, not a commitment to that window — see `SwitcherSession.userPickedSelection`.
     let userPickedSelection: Bool
     let restoreDefaultOnSearchClear: Bool
     let bestMatchOnSearchChange: Bool
+    /// Is the window the user is looking at among the drawn tiles? The default pick steps over the front of
+    /// the list because that is normally the window you are ON, and you summoned the switcher to leave it —
+    /// but filters can drop it from the list entirely (`Apps to show: Non-active apps`, a blacklisted active
+    /// app), and then the front tile IS the window you were on before and stepping over it lands one tile too
+    /// far (#5941).
+    ///
+    /// The shell answers it as "some drawn tile belongs to the frontmost app", NOT "the frontmost app's
+    /// focused window is drawn". The weaker question is the one that fails safe: a stale or nil AX
+    /// `focusedWindow` answers the strict question `false` while the user's window sits right there at tile
+    /// 0, and the default would then select the window they are already on — a worse bug than the one being
+    /// fixed. Only when NO tile belongs to the frontmost app is the user's window certainly not among them.
+    ///
+    /// So the answer is exact for the filters that exclude a whole APP, and coarser than the truth for the
+    /// two that can exclude the current window while a SIBLING window of the same app stays drawn (`Spaces
+    /// to show: other Spaces`, `Screens to show: screen showing AltTab`). Those keep the old overshoot,
+    /// unchanged. Closing that too needs per-window identity, and the cheap version of it — the frontmost
+    /// app's lowest-`lastFocusOrder` window — lands on the current window itself in the grouped-tab case
+    /// `secondVisibleIndex` documents, where a hidden tab holds rank 0 and the current window sits behind it.
+    ///
+    /// Defaults to `true`: the ordinary case, and what every scenario written before #5941 assumes.
+    var currentWindowIsDrawn = true
 }
 
 /// What the kernel recommends. Wrapper translates this into side effects (highlight redraws,
@@ -107,10 +128,17 @@ enum SelectionResolver {
         if i.list.count >= 2 && i.list[0].isMinimized && i.list[1].isMinimized {
             return i.list[0].visible ? 0 : nil
         }
-        return secondVisibleIndexAsOfSummon(i.list, i.visibleCountAtSummon)
+        return defaultPickIndexAsOfSummon(i.list, i.visibleCountAtSummon, i.currentWindowIsDrawn)
     }
 
-    /// `secondVisibleIndex`, over the MRU as it stood when the shortcut was pressed.
+    /// The default pick, over the MRU as it stood when the shortcut was pressed.
+    ///
+    /// **What is stepped over is the window you are ON, and only if it is actually drawn.** The rule reads
+    /// "the window you were on before this one", which is the SECOND drawn window only while the first one
+    /// is the current one. Filters can drop the current window from the list — `Apps to show: Non-active
+    /// apps` removes the whole frontmost app — and then the first drawn window already IS the previous one:
+    /// stepping over it lands on the one before THAT, so alt-tab skips a window and the two-window toggle
+    /// never comes back (#5941). `currentWindowIsDrawn` is the shell's answer to that question.
     ///
     /// The list itself must keep showing the truth: a window created and focused behind the switcher takes
     /// tile 0 and pushes everything along. But the user pressed the shortcut to get back to the window they
@@ -131,7 +159,8 @@ enum SelectionResolver {
     /// really frontmost at the press re-answers the question (a correction re-orders windows that were
     /// already there, so none of them is a newcomer), and a window that closes or stops being drawn simply drops out of the answer.
     /// When stepping over leaves nothing to land on, the plain rule takes over.
-    static func secondVisibleIndexAsOfSummon(_ list: [SelectionWindow], _ visibleCountAtSummon: Int) -> Int? {
+    static func defaultPickIndexAsOfSummon(_ list: [SelectionWindow], _ visibleCountAtSummon: Int,
+                                           _ currentWindowIsDrawn: Bool = true) -> Int? {
         let visible = list.indices.filter { list[$0].visible }
         var arrivals = max(0, visible.count - visibleCountAtSummon)
         var asOfSummon = [Int]()
@@ -142,8 +171,14 @@ enum SelectionResolver {
                 asOfSummon.append(index)
             }
         }
-        guard let current = asOfSummon.first else { return secondVisibleIndex(list) }
-        return asOfSummon.count > 1 ? asOfSummon[1] : current
+        guard let front = asOfSummon.first else {
+            // Every drawn window arrived after the summon, so there is no "as of the summon" list to answer
+            // from — fall back to the plain rule over what is drawn now, still stepping over the front only
+            // when the current window is among it.
+            return currentWindowIsDrawn ? secondVisibleIndex(list) : visible.first
+        }
+        guard currentWindowIsDrawn else { return front }
+        return asOfSummon.count > 1 ? asOfSummon[1] : front
     }
 
     /// The default pick: the PREVIOUSLY-focused window, i.e. the SECOND visible window in MRU order — you

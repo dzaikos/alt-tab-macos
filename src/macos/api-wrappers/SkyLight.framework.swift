@@ -140,7 +140,7 @@ enum CGSSpaceMask: Int {
 /// get the CGSSpaceIDs for the given windows (CGWindowIDs)
 /// * macOS 10.10+
 @_silgen_name("CGSCopySpacesForWindows")
-func CGSCopySpacesForWindows(_ cid: CGSConnectionID, _ mask: CGSSpaceMask.RawValue, _ wids: CFArray) -> CFArray
+func CGSCopySpacesForWindows(_ cid: CGSConnectionID, _ mask: CGSSpaceMask.RawValue, _ wids: CFArray) -> CFArray?
 
 /// returns window level (see definition in CGWindowLevel.h) of provided window
 /// * macOS 10.10+

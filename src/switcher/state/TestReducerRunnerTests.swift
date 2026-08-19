@@ -212,7 +212,8 @@ final class TestReducerRunnerTests: XCTestCase {
             // 19:36:51.245 the tracked active backgrounds behind the newest tab ⇒ the hold arms
             .input(.spaceMembershipChanged(wid: 91409, spaceId: 5335, added: false, now: 100.003, inSpaceTransition: false)),
             // 19:36:51.499 the Spaces re-query confirms it is on no Space (CGS probed it: empty)
-            .input(.spacesSynced(windowToSpaces: [75934: [4594]], topologyChanged: false)),
+            .input(.spacesSynced(windowToSpaces: [75934: [4594]], queried: [91409, 75934],
+                placedByWindowServer: [], topologyChanged: false)),
             // ~19:36:51.6 the hold-release check fires while the burst is still going
             .input(.holdReleaseCheck(wid: 91409, attempt: 0)),
         ])

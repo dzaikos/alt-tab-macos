@@ -35,17 +35,36 @@ struct SystemKeychain: Keychain {
         }
     }
 
+    /// Updates our own item in place, and only adds when there is nothing readable there. Never deletes
+    /// first: where writes fail but reads work (a locked or password-drifted login keychain returns
+    /// `errSecAuthFailed` on write), a delete-then-add destroys a working license and cannot put it back.
+    ///
+    /// The read gate keeps us off items belonging to another code signature. `SecItemUpdate` needs no ACL
+    /// authorization, so a differently-signed build (a local dev build next to a released one: same bundle
+    /// id, same service) would silently overwrite the real license and leave the item unreadable to both.
+    /// Letting `SecItemAdd` fail with `errSecDuplicateItem` keeps that visible, as it was before.
     @discardableResult
     func setValue(_ value: String, account: String) -> OSStatus {
-        remove(account: account)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
-            kSecValueData as String: value.data(using: .utf8)!,
         ]
-        let status = SecItemAdd(query as CFDictionary, nil)
+        let data = value.data(using: .utf8)!
+        if self.value(account: account) != nil {
+            let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+            // errSecItemNotFound: it vanished between the read and the update, so fall through to the add.
+            if status != errSecItemNotFound {
+                if status != errSecSuccess {
+                    Logger.error { "keychain update account=\(account) failed: \(Self.describe(status))" }
+                }
+                return status
+            }
+        }
+        var addQuery = query
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
+        addQuery[kSecValueData as String] = data
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
         if status != errSecSuccess {
             Logger.error { "keychain write account=\(account) failed: \(Self.describe(status))" }
         }

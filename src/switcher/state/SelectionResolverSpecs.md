@@ -40,7 +40,28 @@ is fronted when discovered, then hidden once grouped), so index 0 can be hidden 
 window — counting indices then selected the current window itself. Windowless app entries and invisible
 windows are skipped when scanning. `findTarget` only matches a target id that is currently visible.
 
-`secondVisibleIndex` counts the MRU **as of the summon**: windows flagged `appearedAfterSummon` are stepped
+**The front tile is stepped over because it is the window you are ON, so it is not stepped over when it
+isn't.** `Apps to show: Non-active apps` removes the whole frontmost app from the list, and the same happens
+whenever a filter excludes the current window (a blacklisted active app, a Space or screen scope it falls
+outside of). The front tile is then already "the window you were on before", and stepping over it aims one
+tile past what the user asked for: alt-tab hands them a window they never chose, and the two-window toggle
+never comes back (#5941). `SelectionInputs.currentWindowIsDrawn` carries the answer; when it is false the
+pick is the FIRST drawn tile as of the summon rather than the second, and every other rule is untouched.
+
+The shell answers that question of the APP — "does some drawn tile belong to the frontmost app" — not of the
+window. The strict question ("is the frontmost app's focused window drawn") reads `application.focusedWindow`,
+which can be stale or nil, and answering it wrongly puts the default on the window the user is already
+looking at. The app-level question can only be false when the current window is genuinely absent.
+
+That makes the answer exact for the filters that drop a whole app (`Non-active apps`, an Exceptions rule) and
+deliberately coarse for the two that can drop the current window while a SIBLING window of the same app stays
+drawn: `Spaces to show: other Spaces` and `Screens to show: screen showing AltTab`. Under those the pick still
+steps one tile too far, exactly as it did before — a known gap, not a regression. The only rule that would
+close it is per-window identity, and the cheap version (the frontmost app's lowest `lastFocusOrder` window)
+selects the current window itself in the grouped-tab case below, where a hidden tab holds rank 0 while the
+current window sits behind it. A worse bug than the one being fixed, so the gap stays.
+
+The pick counts the MRU **as of the summon**: windows flagged `appearedAfterSummon` are stepped
 over. The drawn list keeps showing the truth — a window created and focused behind the switcher takes tile 0
 and pushes everything along — but "the window you were on before" is a question about the moment the shortcut
 was pressed, and it does not change because something else appeared afterwards. The flag means ABSENT FROM THE LIST AT THE PRESS, not "focused since": a tab group re-electing a
@@ -62,7 +83,8 @@ so no event can land in between.
 ## Test scenarios
 
 Mirrors `SelectionResolverTests.swift` 1:1. Groups: A initial pick · B preserve target (#5665) ·
-C target removed · D search mode · E edge cases · plus direct helper-kernel checks.
+C target removed · D search mode · E edge cases · F current window not drawn (#5941) · plus direct
+helper-kernel checks.
 
 ### A. Initial pick (`selectedTarget == nil`)
 - **testInitialPickEmptyList** — no windows → `clearTargetAndHover`.
@@ -98,6 +120,31 @@ C target removed · D search mode · E edge cases · plus direct helper-kernel c
 - **testEdgeSingleWindowBecomesInvisible** — the only window goes invisible → clear selection.
 - **testEdgeNewWindowPushesTargetDown** — a window inserts ahead → highlight follows the target down.
 - **testEdgeStaleSelectedTarget** — target id never existed (corrupt/stale) → adapt + backfill.
+
+### F. The current window is not in the drawn list (#5941)
+- **testInitialPickCurrentWindowFilteredOutLandsOnTheFrontTile** — `Non-active apps` on VS Code draws Chrome's
+  two windows; the front one is the window you were on before, so the default lands there.
+- **testInitialPickCurrentWindowFilteredOutTogglesBackToWhereItCameFrom** — the return trip, which is what
+  makes alt-tab a toggle again instead of a walk further away each press.
+- **testInitialPickCurrentWindowDrawnStillStepsOverTheFrontTile** — the control on the same list shape: with
+  the current window drawn the default is still tile 1.
+- **testInitialPickCurrentWindowFilteredOutWithASingleTile** — one tile left, land on it.
+- **testInitialPickStepsOverANewcomerEvenWhenTheCurrentWindowIsFilteredOut** — the two step-over rules compose:
+  one steps over what ARRIVED behind the switcher, the other over the window you are on.
+- **testInitialPickDoesNotStepOverAReplacementWhenTheCurrentWindowIsFilteredOut** — a newcomer that replaced a
+  window that left keeps the pick on the front tile; the list never grew.
+- **testInitialPickFallsBackToTheFrontTileWhenSteppingOverLeavesNothing** — every drawn window arrived after
+  the summon; the fallback still lands on the front tile, never on nothing.
+- **testInitialPickCurrentWindowFilteredOutCountsDrawnTilesNotIndexes** — a hidden grouped tab ahead of the
+  first drawn tile does not shift the answer onto raw index 0.
+- **testInitialPickLastFocusedRuleIsUnaffectedByTheFlag** — alphabetical / Space ordering already picked the
+  most recently focused DRAWN window; the flag leaves that path alone.
+- **testSearchRestoreDefaultOnClearHonorsTheFilteredOutCurrentWindow** — clearing a query restores the #5941
+  default, not the old one.
+- **testUserPickedTargetIsFollowedWhenTheCurrentWindowIsFilteredOut** — a target the USER picked is still
+  followed by id (#5665); the flag only says where the DEFAULT starts.
+- **testInitialPickTopTwoMinimizedIsUnaffectedByTheFlag** — the both-top-minimized edge never stepped over
+  anything, and still doesn't.
 
 ### Helper kernels (direct)
 - **testGetLastFocusedOrderWindowIndexIgnoresWindowlessAndInvisible** — scan ignores windowless + invisible.

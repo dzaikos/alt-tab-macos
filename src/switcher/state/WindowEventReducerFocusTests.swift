@@ -240,4 +240,195 @@ final class WindowEventReducerFocusTests: XCTestCase {
         XCTAssertTrue(effects.contains(.applyFocus(Self.reaperMainWid)))
         XCTAssertFalse(effects.contains(.applyFocus(backgroundTab)))
     }
+
+    // MARK: - D. The screen coming back (#5936)
+
+    /// The measured burst: waking the display orders EVERY window back in inside one millisecond, with no
+    /// order-out in front of it, so `offScreen` cannot tell the re-show from a raise. Each order-in of the
+    /// active app's windows would otherwise re-front, walking that app's whole set to the top of the MRU in
+    /// burst order — "all my Chrome windows are at the front", after only stepping away.
+    func testTheWakeBurstDoesNotReorderTheMru() {
+        var s = state([
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 0),
+            window(Self.finderWid, Self.finderPid, "Liebesleid", order: 1),
+            window(Self.reaperMainWid, Self.reaperPid, "Country Dance - REAPER v7.78", order: 2),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .systemReshow(now: 100, source: .wake))
+        // the burst, 2.03s after the wake notification (measured), every window in the same millisecond
+        for wid in [Self.reaperDialogWid, Self.finderWid, Self.reaperMainWid] {
+            let effects = WindowEventReducer.reduce(&s,
+                .windowOrderedIn(wid: wid, now: 102.03, inSpaceTransition: false))
+            XCTAssertFalse(effects.contains(.applyFocus(wid)), "#\(wid) was re-fronted by the wake burst")
+        }
+        XCTAssertEqual(order(s, Self.reaperDialogWid), 0)
+        XCTAssertEqual(order(s, Self.finderWid), 1)
+        XCTAssertEqual(order(s, Self.reaperMainWid), 2)
+    }
+
+    /// The capture that showed the damage in full (21:39:01, macOS 26): opening Mission Control emits the
+    /// same burst 12ms after the Dock's `AXExposeShowAllWindows`, and the frontmost app's three windows —
+    /// sitting at MRU 0, 2 and 3 — were all re-fronted, in burst order. Nothing else was in flight: no Space
+    /// transition, no activation, no lock, no sleep. Just Mission Control.
+    func testTheMissionControlBurstDoesNotReorderTheMru() {
+        let reaperThirdWid: CGWindowID = 4601
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "Country Dance - REAPER v7.78", order: 0),
+            window(Self.finderWid, Self.finderPid, "Liebesleid", order: 1),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 2),
+            window(reaperThirdWid, Self.reaperPid, "Untitled", order: 3),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .systemReshow(now: 100, source: .missionControl))
+        for wid in [Self.reaperMainWid, Self.finderWid, Self.reaperDialogWid, reaperThirdWid] {
+            let effects = WindowEventReducer.reduce(&s,
+                .windowOrderedIn(wid: wid, now: 100.012, inSpaceTransition: false))
+            XCTAssertFalse(effects.contains(.applyFocus(wid)), "#\(wid) was re-fronted by Mission Control")
+        }
+        XCTAssertEqual(order(s, Self.reaperMainWid), 0)
+        XCTAssertEqual(order(s, Self.finderWid), 1)
+        XCTAssertEqual(order(s, Self.reaperDialogWid), 2)
+        XCTAssertEqual(order(s, reaperThirdWid), 3)
+    }
+
+    /// The backstop, with NO signal armed at all: the same burst is recognised by its shape, because a raise
+    /// moves one window and a re-show moves all of them at once. The first member still bumps (nothing
+    /// separates it from a raise yet) and is harmless — it is the frontmost app's front window, already at
+    /// MRU 0. Members 2..N are the damage, and they are what this catches.
+    func testABurstIsCaughtByItsShapeWithNoSignalArmed() {
+        let reaperThirdWid: CGWindowID = 4601
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "Country Dance - REAPER v7.78", order: 0),
+            window(Self.finderWid, Self.finderPid, "Liebesleid", order: 1),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 2),
+            window(reaperThirdWid, Self.reaperPid, "Untitled", order: 3),
+        ], frontmost: Self.reaperPid)
+        // the captured spacing: consecutive members ~0.12ms apart
+        for (i, wid) in [Self.reaperMainWid, Self.finderWid, Self.reaperDialogWid, reaperThirdWid].enumerated() {
+            _ = WindowEventReducer.reduce(&s,
+                .windowOrderedIn(wid: wid, now: 100 + Double(i) * 0.00012, inSpaceTransition: false))
+        }
+        XCTAssertEqual(order(s, Self.reaperMainWid), 0, "the burst's first member held the front it already had")
+        XCTAssertEqual(order(s, Self.finderWid), 1)
+        XCTAssertEqual(order(s, Self.reaperDialogWid), 2, "a burst member walked to the front")
+        XCTAssertEqual(order(s, reaperThirdWid), 3, "a burst member walked to the front")
+    }
+
+    /// The counterfactual that keeps Cmd+` working: an order-in ARRIVING ALONE is still the in-app raise it
+    /// has always been. 200ms is under the fastest human action in any capture (219ms, #5785).
+    func testALoneOrderInStillBumps() {
+        var s = state([
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 0),
+            window(Self.reaperMainWid, Self.reaperPid, "Country Dance - REAPER v7.78", order: 1),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s,
+            .windowOrderedIn(wid: Self.reaperDialogWid, now: 100, inSpaceTransition: false))
+        let effects = WindowEventReducer.reduce(&s,
+            .windowOrderedIn(wid: Self.reaperMainWid, now: 100.2, inSpaceTransition: false))
+        XCTAssertTrue(effects.contains(.applyFocus(Self.reaperMainWid)))
+        XCTAssertEqual(order(s, Self.reaperMainWid), 0)
+    }
+
+    /// The SAME window ordered in twice in an instant is not a burst, it is one window reported twice — the
+    /// shape every genuine focus has (its 808 and its 815 land in the same millisecond).
+    func testTheSameWindowTwiceIsNotABurst() {
+        var s = state([
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 0),
+            window(Self.reaperMainWid, Self.reaperPid, "Country Dance - REAPER v7.78", order: 1),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s,
+            .windowOrderedIn(wid: Self.reaperMainWid, now: 100, inSpaceTransition: false))
+        let effects = WindowEventReducer.reduce(&s,
+            .windowOrderedIn(wid: Self.reaperMainWid, now: 100.001, inSpaceTransition: false))
+        XCTAssertTrue(effects.contains(.applyFocus(Self.reaperMainWid)))
+        XCTAssertEqual(order(s, Self.reaperMainWid), 0)
+    }
+
+    /// An UNTRACKED wid in the burst still counts as evidence: a re-show sweeps up every window on screen,
+    /// including ones we have not discovered yet, and a record with holes cannot recognise a burst. Here the
+    /// untracked wid separates two tracked ones, so without it the second would read as arriving alone.
+    func testAnUntrackedWidCountsAsBurstEvidence() {
+        let untrackedWid: CGWindowID = 9999
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "Country Dance - REAPER v7.78", order: 0),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 1),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .windowOrderedIn(wid: untrackedWid, now: 100, inSpaceTransition: false))
+        let effects = WindowEventReducer.reduce(&s,
+            .windowOrderedIn(wid: Self.reaperDialogWid, now: 100.001, inSpaceTransition: false))
+        XCTAssertFalse(effects.contains(.applyFocus(Self.reaperDialogWid)))
+        XCTAssertEqual(order(s, Self.reaperDialogWid), 1)
+    }
+
+    /// Each mute is sized for its own trigger, and this is what that buys: dismiss Mission Control, cycle
+    /// windows a beat later, and the raise still moves the MRU. Under one mute sized for the wake burst's
+    /// 2.03s lag, a Cmd+` a second after a gesture that finishes in 100ms was swallowed.
+    func testAnInAppRaiseASecondAfterMissionControlStillBumps() {
+        var s = state([
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 0),
+            window(Self.reaperMainWid, Self.reaperPid, "Country Dance - REAPER v7.78", order: 1),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .systemReshow(now: 100, source: .missionControl))
+        let effects = WindowEventReducer.reduce(&s,
+            .windowOrderedIn(wid: Self.reaperMainWid, now: 101, inSpaceTransition: false))
+        XCTAssertTrue(effects.contains(.applyFocus(Self.reaperMainWid)))
+        XCTAssertEqual(order(s, Self.reaperMainWid), 0)
+    }
+
+    /// ...and the wake mute really does stay open that long, because its own burst arrives at 2.03s. The two
+    /// together are the whole point of sizing per source rather than taking the slowest for everyone.
+    func testTheWakeMuteStillCoversItsOwnLateBurst() {
+        var s = state([
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 0),
+            window(Self.reaperMainWid, Self.reaperPid, "Country Dance - REAPER v7.78", order: 1),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .systemReshow(now: 100, source: .wake))
+        let effects = WindowEventReducer.reduce(&s,
+            .windowOrderedIn(wid: Self.reaperMainWid, now: 102.03, inSpaceTransition: false))
+        XCTAssertFalse(effects.contains(.applyFocus(Self.reaperMainWid)))
+        XCTAssertEqual(order(s, Self.reaperMainWid), 1)
+    }
+
+    /// The mute is time-bounded, because the signal it stands in front of is real: an order-in of the active
+    /// app's window IS the native Cmd+` raise, which emits nothing else. Past the window it bumps as before.
+    func testAnInAppRaiseStillBumpsOnceTheMuteExpired() {
+        var s = state([
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 0),
+            window(Self.reaperMainWid, Self.reaperPid, "Country Dance - REAPER v7.78", order: 1),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .systemReshow(now: 100, source: .wake))
+        let effects = WindowEventReducer.reduce(&s,
+            .windowOrderedIn(wid: Self.reaperMainWid, now: 103.5, inSpaceTransition: false))
+        XCTAssertTrue(effects.contains(.applyFocus(Self.reaperMainWid)))
+        XCTAssertEqual(order(s, Self.reaperMainWid), 0)
+    }
+
+    /// Only the order-in path is muted. An 808 is the OS STATING a focus rather than us inferring one from a
+    /// raise, the wake burst contains none, and swallowing one would lose the first window the user picks.
+    func testAFocusEventDuringTheMuteStillBumps() {
+        var s = state([
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 0),
+            window(Self.reaperMainWid, Self.reaperPid, "Country Dance - REAPER v7.78", order: 1),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .systemReshow(now: 100, source: .wake))
+        let effects = WindowEventReducer.reduce(&s,
+            .windowFocused(wid: Self.reaperMainWid, now: 102.03))
+        XCTAssertTrue(effects.contains(.applyFocus(Self.reaperMainWid)))
+        XCTAssertEqual(order(s, Self.reaperMainWid), 0)
+    }
+
+    /// An un-minimize is spared the mute: a wake leaves minimized windows minimized, so a window our model
+    /// watched leave that state was restored by the user. It matters because a Dock restore inside the
+    /// already-frontmost app emits ONLY this order-in — nothing behind it would correct a swallowed bump.
+    func testRestoringAMinimizedWindowDuringTheMuteStillBumps() {
+        var s = state([
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 0),
+            window(Self.reaperMainWid, Self.reaperPid, "Country Dance - REAPER v7.78", order: 1,
+                isMinimized: true),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .systemReshow(now: 100, source: .wake))
+        let effects = WindowEventReducer.reduce(&s,
+            .windowOrderedIn(wid: Self.reaperMainWid, now: 102.03, inSpaceTransition: false))
+        XCTAssertTrue(effects.contains(.applyFocus(Self.reaperMainWid)))
+        XCTAssertEqual(order(s, Self.reaperMainWid), 0)
+        XCTAssertEqual(s.window(Self.reaperMainWid)?.isMinimized, false)
+    }
 }

@@ -397,10 +397,7 @@ class Preferences {
     }
 
     static func archiveShortcut(_ shortcut: Shortcut?) -> Data {
-        if #available(macOS 10.13, *) {
-            return try! NSKeyedArchiver.archivedData(withRootObject: shortcut ?? emptyShortcut, requiringSecureCoding: true)
-        }
-        return NSKeyedArchiver.archivedData(withRootObject: shortcut ?? emptyShortcut)
+        try! NSKeyedArchiver.archivedData(withRootObject: shortcut ?? emptyShortcut, requiringSecureCoding: true)
     }
 
     static func shortcutStorage(_ shortcut: Shortcut?, _ stringRepresentation: String?) -> [String: Any] {

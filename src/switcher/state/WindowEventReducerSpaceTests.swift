@@ -74,4 +74,64 @@ final class WindowEventReducerSpaceTests: XCTestCase {
                        "the settled pass owns the full refresh; emitting the leading edge's cheap read too "
                        + "would re-read the topology twice for nothing")
     }
+
+    // MARK: - C. The Spaces answer applies only to the windows it was asked about
+
+    /// The pass captures its wid list on main, queries off-main, and lands later. A window discovered in that
+    /// gap is in the model but was never asked about, so the map cannot place it — and applying the map to it
+    /// anyway asserted "CGS places this window nowhere", the strong phantom signal, on a window whose own
+    /// discovery had just read its Space. It went hidden until the next pass happened to cover it.
+    func testAnAnswerDoesNotWipeAWindowItNeverAskedAbout() {
+        var s = state()
+        _ = WindowEventReducer.reduce(&s, .spacesSynced(windowToSpaces: [Self.widA: [1]],
+            queried: [Self.widA], placedByWindowServer: [], topologyChanged: false))
+        XCTAssertEqual(s.window(Self.widB)?.spaceIds, [2], "widB was never queried, so nothing was learnt")
+        XCTAssertFalse(s.isPhantom(s.windows[1]))
+    }
+
+    /// Skipping is for SILENCE only. `Spaces.query` enumerates every Space and keeps whatever CGS lists, so
+    /// the map is not limited to the wids the pass asked about — a window appended mid-flight is usually in
+    /// it, and that answer beats the current-Space GUESS its discovery fell back on when its own per-window
+    /// query came back empty. Dropping it would leave the window drawn under the wrong Space.
+    func testAnAnswerIsAppliedEvenToAWindowItNeverAskedAbout() {
+        var s = state()
+        _ = WindowEventReducer.reduce(&s, .spacesSynced(windowToSpaces: [Self.widB: [1]],
+            queried: [Self.widA], placedByWindowServer: [], topologyChanged: false))
+        XCTAssertEqual(s.window(Self.widB)?.spaceIds, [1])
+    }
+
+    /// The other half, which must keep working: a wid the pass DID ask about, the map does not place, and the
+    /// WindowServer does not place either. THAT is CGS answering "no Space", and it is what retires a group's
+    /// dead members and hands a closed window to the sweep, so neither skip above may swallow it.
+    func testAQueriedWindowWithNoAnswerIsStillWiped() {
+        var s = state()
+        _ = WindowEventReducer.reduce(&s, .spacesSynced(windowToSpaces: [Self.widA: [1]],
+            queried: [Self.widA, Self.widB], placedByWindowServer: [], topologyChanged: false))
+        XCTAssertEqual(s.window(Self.widB)?.spaceIds, [])
+        XCTAssertTrue(s.isPhantom(s.windows[1]))
+    }
+
+    // MARK: - D. An empty Space answer is not evidence on its own (#5954)
+
+    /// CGS answers a non-NULL EMPTY array for a wid it has no record of at all — measured on macOS 26 for
+    /// wid 0, 1, 999999 and UINT32_MAX — so "this window is on no Space" and "there is no such window" reach
+    /// the reducer as the same value, and the strong phantom signal used to hide the window on both. When the
+    /// WindowServer contradicts the emptiness (it knows the wid and places it on a Space), the window keeps
+    /// the last membership CGS itself reported instead of being wiped and hidden with no way back.
+    func testAContradictedEmptyKeepsTheLastKnownMembership() {
+        var s = state()
+        _ = WindowEventReducer.reduce(&s, .spacesSynced(windowToSpaces: [Self.widA: [1]],
+            queried: [Self.widA, Self.widB], placedByWindowServer: [Self.widB], topologyChanged: false))
+        XCTAssertEqual(s.window(Self.widB)?.spaceIds, [2], "the last CGS-reported membership, not a guess")
+        XCTAssertFalse(s.isPhantom(s.windows[1]))
+    }
+
+    /// The contradiction must not resurrect a window CGS places somewhere new: a real answer always wins over
+    /// the keep, or a window that genuinely moved Space would be frozen at its old one.
+    func testAPlacedWindowStillTakesItsNewSpace() {
+        var s = state()
+        _ = WindowEventReducer.reduce(&s, .spacesSynced(windowToSpaces: [Self.widA: [1], Self.widB: [1]],
+            queried: [Self.widA, Self.widB], placedByWindowServer: [Self.widB], topologyChanged: false))
+        XCTAssertEqual(s.window(Self.widB)?.spaceIds, [1])
+    }
 }

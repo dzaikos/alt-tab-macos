@@ -49,3 +49,37 @@ correction from 19ms to 220ms after the summon. It looks free and it is not.
 - **testSpaceChangeSettledKeepsMembershipAndTheStateRequery** — `.spaceChangeSettled` still emits the
   per-window Space sync, the WindowServer state re-query for every tracked window, the shortcut re-check and
   the repaint. Collapsing the two branches into one would either run this storm-time work early or lose it.
+
+### C. The Spaces answer applies only to the windows it was asked about
+
+`syncSpacesState` captures the tracked wid list on main, does its Space enumeration plus per-window backfill
+off-main, and applies the result when it lands. A window discovered in that gap is in the model but was never
+part of the question, so the pass has nothing to say about it unless its Space enumeration happened to list it.
+Treating that silence as an answer turned it into a verdict — "CGS places this window nowhere", the strong
+phantom signal — and hid a window whose own discovery had just read its Space correctly, until a later pass
+happened to cover it. The input now carries the wids it queried, and only those are wiped by its silence.
+
+- **testAnAnswerDoesNotWipeAWindowItNeverAskedAbout** — a window outside `queried` keeps its Space and stays
+  shown.
+- **testAQueriedWindowWithNoAnswerIsStillWiped** — a window inside `queried` that the map does not place is
+  wiped and turns phantom: that is CGS answering "no Space", the evidence that retires dead group members and
+  feeds the dead-window sweep.
+- **testAnAnswerIsAppliedEvenToAWindowItNeverAskedAbout** — the map is built by enumerating every Space, not
+  from the queried list, so a window appended mid-flight is usually in it. That answer is applied: skipping is
+  for silence, and dropping a fact we hold would leave the window under the current-Space guess its discovery
+  fell back on.
+
+### D. An empty Space answer is not evidence on its own
+
+`CGSCopySpacesForWindows` answers a non-NULL **empty** array for a wid CGS has no record of at all (measured
+on macOS 26: wid 0, 1, 999999 and UINT32_MAX all answer `[]`). So "this window is on no Space", "there is no
+such window" and a read that found nothing arrive as one value, and the strong phantom signal hid the window
+on all three, permanently, since nothing re-derives membership afterwards (#5954). `syncSpacesState` now
+corroborates the wids it could not place against the WindowServer, which omits a wid it does not know and
+reports a non-zero `spaceTypeMask` for one it places, and passes the contradictions to the reducer.
+
+- **testAContradictedEmptyKeepsTheLastKnownMembership** — the WindowServer places a window the map does not:
+  it keeps the last membership CGS itself reported and stays shown. Stale at worst, where the alternatives
+  are hiding it with no recovery path or inventing a Space other rules would read as truth.
+- **testAPlacedWindowStillTakesItsNewSpace** — a real answer always beats the keep, so a window that genuinely
+  changed Space is not frozen at its old one.

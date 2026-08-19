@@ -49,8 +49,8 @@ class Window {
     /// until `spacesSynced` re-read the Space CGS had held for it the whole time. rec20's stray is answered
     /// by this flag alone — every claim rule reads it, with the Space still set
     /// (`testExRepresentativeWithABorrowedSpaceIsClaimable`) — and an ex-member that is genuinely gone is not
-    /// left standing: `spacesSynced` applies `[]` to every tracked wid its map doesn't place, which turns it
-    /// phantom and hands it to the dead-window sweep.
+    /// left standing: `spacesSynced` applies `[]` to every wid it QUERIED and its map doesn't place, which
+    /// turns it phantom and hands it to the dead-window sweep.
     var spaceIsBorrowed = false
     /// The Space this window most recently LEFT (a 1326 names it), nil once it joins one again — the history
     /// tab-grouping needs to tell a just-backgrounded tab from a brand-new one. Owned by the reducer.

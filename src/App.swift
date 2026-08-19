@@ -48,7 +48,11 @@ class App: AppCenterApplication {
     }
 
     /// we put application code here which should be executed on init() and Preferences change
+    /// The switcher UI only exists once permissions are granted. Activating a license through the
+    /// `alt-tab://activate` url launches the app and can land its callback before that, so we bail
+    /// instead of resetting a UI that isn't built yet (`TilesView.reset` traps on `TilesPanel.shared`).
     static func resetPreferencesDependentComponents() {
+        guard TilesPanel.shared != nil else { return }
         TilesView.reset()
     }
 
@@ -482,6 +486,14 @@ extension App: NSApplicationDelegate {
         // if a queued discovery block drains re-entrantly before this runs, it traps on the nil queue (#5819).
         // preStart just allocates queues and depends on nothing, so it's safe at the very top.
         BackgroundWork.preStart()
+        // Same reasoning as the queues above: a preference the user never changed lives only in the
+        // registration domain, so reading one before `registerDefaults()` traps on the force-unwrap in
+        // `CachedUserDefaults.getThenConvertOrReset`. The "move to /Applications" modal below drains the
+        // main queue, and the crash-report attachment delegate hops to main there to build the debug
+        // profile, which reads `showOnScreen` / `appearanceStyle`. Migrations must keep running before
+        // `registerDefaults()` (they read raw plist values), which `initialize()` already guarantees.
+        // This only touches UserDefaults + TIS (main-thread), so it depends on nothing below.
+        Preferences.initialize()
         // Handle the "move to /Applications" prompt before anything else sets up the model. It runs a modal
         // alert (and may relaunch + exit), both of which pump the main run loop, so it must come before the
         // WindowServer tap below: otherwise the tap's queued window discovery drains re-entrantly during the
@@ -497,7 +509,6 @@ extension App: NSApplicationDelegate {
         // independent of whether the user has granted AX.
         WindowServerEvents.observe()
         AXUIElement.setGlobalTimeout()
-        Preferences.initialize()
         PreferencesPersistenceCheck.runInBackground()
         LicenseManager.shared.onBeforeProUnlock = { ProTransitionManager.shared.onProUnlocked() }
         LicenseManager.shared.onStateChanged = { state in
@@ -506,7 +517,7 @@ extension App: NSApplicationDelegate {
             ProTransitionManager.shared.onLicenseStateChanged()
             UpgradeTab.refreshStatus()
             SettingsWindow.shared?.refreshUpgradeButton()
-            if TilesPanel.shared != nil { App.resetPreferencesDependentComponents() }
+            App.resetPreferencesDependentComponents()
             // `isProLocked` reads from state, so a state change implicitly changes the lock.
             // Notify UI observers so Settings rows repaint their ghost/pro-locked styling.
             NotificationCenter.default.post(name: ProTransitionManager.proLockStateDidChangeNotification, object: nil)

@@ -290,6 +290,15 @@ struct TrackedWindowState: Equatable {
         var offScreen = Set<CGWindowID>()
         /// per-app activation state for the 808 storm
         var pendingActivationRaises = [pid_t: ActivationEntry]()
+        /// Until when a system re-show is considered in flight, so the OS putting the desktop back does not
+        /// read as the user raising each window (`WindowEventReducer.systemReshowMute`).
+        var systemReshowMuteUntil: TimeInterval = 0
+        /// The previous order-in (815), whatever it was for: the pair that lets the NEXT one tell a lone
+        /// raise from a member of a re-show burst (`WindowEventReducer.reshowBurstGap`). Recorded for
+        /// untracked wids too — a burst sweeps up every window on screen, and one we do not track yet is
+        /// still evidence that this is a burst.
+        var lastOrderInAt: TimeInterval = 0
+        var lastOrderInWid: CGWindowID?
         /// uptime of the most recent `windowCreated`
         var lastWindowCreatedAt: TimeInterval = 0
         /// The wid of that most recent `windowCreated` (the pair to `lastWindowCreatedAt`, exactly as
@@ -651,6 +660,17 @@ struct WsWindowSnapshot: Equatable {
 /// discovery / WS state / the Spaces re-query / an AX liveness probe), or a timer check firing. Each case
 /// carries exactly the OS-reported payload plus the ambient facts the live handler read at that instant
 /// (uptime, app-active, in-Space-transition) — so a recorded debug log can be transcribed input by input.
+/// Which gesture is about to make the OS put the desktop back. They differ only in how far ahead of the
+/// burst they arrive, which is what `WindowEventReducer.systemReshowMute` reads them for.
+enum ReshowSource: Equatable {
+    /// Mission Control / App Exposé / Show Desktop opening (`DockEvents`).
+    case missionControl
+    /// A display added, removed or resized (`ScreensEvents`).
+    case screens
+    /// The display waking or the session unlocking (`SleepWakeEvents` / `ScreenLockEvents`).
+    case wake
+}
+
 enum ReducerInput: Equatable {
     // WindowServer events (raw ids in `WsEventRouting.Notification`)
     case windowCreated(wid: CGWindowID, now: TimeInterval, inSpaceTransition: Bool)          // 811
@@ -666,6 +686,10 @@ enum ReducerInput: Equatable {
     /// NSWorkspace didActivateApplication (no WS equivalent). `altTabTargetWid` = a fresh AltTab-initiated
     /// focus of this app, when known.
     case appActivated(pid: pid_t, now: TimeInterval, altTabTargetWid: CGWindowID?)
+    /// The OS is about to put the whole desktop back, and which gesture it was — because they announce
+    /// themselves at very different distances from the burst they predict, and the mute should be no longer
+    /// than its own trigger needs (`WindowEventReducer.systemReshowMute`).
+    case systemReshow(now: TimeInterval, source: ReshowSource)
 
     // async read results landing
     /// The apply-side of `Applications.addDiscoveredWindow`: acquisition + discrimination ran in the shell;
@@ -681,8 +705,25 @@ enum ReducerInput: Equatable {
     /// A batched WS state query landed (`Applications.updateWindowStatesViaWindowServer`).
     case windowServerStateRead([WsWindowSnapshot])
     /// The off-main Spaces re-query landed (`Applications.syncSpacesState`): the authoritative per-window
-    /// Space map, plus whether the topology snapshot changed anything.
-    case spacesSynced(windowToSpaces: [CGWindowID: [UInt64]], topologyChanged: Bool)
+    /// Space map, the wids it actually ASKED about, plus whether the topology snapshot changed anything.
+    ///
+    /// `queried` is what makes an absent wid readable. The map is built off-main from the tracked list as it
+    /// stood when the pass STARTED, and applied when it lands, so "absent" conflates two opposite facts: CGS
+    /// answered "no Space" for a wid we asked about (evidence — the strong phantom signal, and what retires a
+    /// group's dead members), and a wid that entered the model mid-flight and was never asked about at all
+    /// (silence). Applying the second as the first wiped the Space a brand-new window's own discovery had
+    /// just queried, hiding it until the next pass. Only `queried` wids are applied; the rest keep what they
+    /// have.
+    ///
+    /// `placedByWindowServer` names the wids the pass could not place but the WindowServer says ARE on a
+    /// Space — a contradiction between two OS reads, and the one case where an empty answer is not evidence.
+    /// It exists because CGS answers a non-NULL EMPTY array for a wid it has no record of (measured: 0, 1,
+    /// 999999, UINT32_MAX), so "this window is on no Space" and "there is no such window" are the same value
+    /// coming back. Such a window keeps the last membership CGS itself reported, which beats both wiping it
+    /// (hidden with no recovery path, #5954) and inventing a Space for it (a fabricated fact other rules read
+    /// as truth). Empty for every window in the ordinary case.
+    case spacesSynced(windowToSpaces: [CGWindowID: [UInt64]], queried: Set<CGWindowID>,
+                      placedByWindowServer: Set<CGWindowID>, topologyChanged: Bool)
     /// An AX `kAXFocusedWindow` read landed — the two focus signals that arrive as a READ rather than as a
     /// WindowServer event. `viaActivationBackstop`: an activation that emitted no 808
     /// (`WindowServerEvents.bumpFocusOnActivation`), else a window discovered while its app was already
