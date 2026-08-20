@@ -46,11 +46,13 @@ struct SelectionInputs: Equatable {
     /// app), and then the front tile IS the window you were on before and stepping over it lands one tile too
     /// far (#5941).
     ///
-    /// The shell answers it as "some drawn tile belongs to the frontmost app", NOT "the frontmost app's
-    /// focused window is drawn". The weaker question is the one that fails safe: a stale or nil AX
-    /// `focusedWindow` answers the strict question `false` while the user's window sits right there at tile
-    /// 0, and the default would then select the window they are already on — a worse bug than the one being
-    /// fixed. Only when NO tile belongs to the frontmost app is the user's window certainly not among them.
+    /// Answered of the APP by `SelectionResolver.currentWindowIsDrawn` — "is a window of the frontmost app
+    /// that COULD be the current one being kept out of the list" — not of the window. The strict question
+    /// reads the AX `focusedWindow`, which can be stale or nil, and answering it `false` while the user's
+    /// window sits right there at tile 0 selects the window they are already on: a worse bug than the one
+    /// being fixed. Windows that cannot be the one on screen (a windowless placeholder, a phantom, a
+    /// minimized window) are the only ones skipped, so an app that owns none of them is left to the ordinary
+    /// rule (#5960).
     ///
     /// So the answer is exact for the filters that exclude a whole APP, and coarser than the truth for the
     /// two that can exclude the current window while a SIBLING window of the same app stays drawn (`Spaces
@@ -61,6 +63,14 @@ struct SelectionInputs: Equatable {
     ///
     /// Defaults to `true`: the ordinary case, and what every scenario written before #5941 assumes.
     var currentWindowIsDrawn = true
+}
+
+/// One window of the frontmost app, seen the way "is the window the user is looking at drawn?" needs it.
+struct FrontmostAppWindow: Equatable {
+    let visible: Bool
+    let isWindowlessApp: Bool
+    let isPhantom: Bool
+    let isMinimized: Bool
 }
 
 /// What the kernel recommends. Wrapper translates this into side effects (highlight redraws,
@@ -207,6 +217,28 @@ enum SelectionResolver {
             }
         }
         return bestIndex
+    }
+
+    /// Answers `SelectionInputs.currentWindowIsDrawn` from the frontmost app's own windows.
+    ///
+    /// The question is not "does this app have a drawn tile" but "is a window that could be the one the user
+    /// is looking at being kept out of the list". Only a filter can do that, and only to a window that
+    /// exists: an app with no such window is not having anything hidden from the user, so the ordinary rule
+    /// applies and the front tile is stepped over as the window they are on.
+    ///
+    /// That distinction is the whole of #5960. Closing the last window of the frontmost app leaves it running
+    /// and still frontmost with nothing but a windowless placeholder — which `Windowless apps: Hide` then
+    /// drops — so no tile belonged to it and the pick stopped stepping over the front tile. The window on top
+    /// of the screen was the front tile, and alt-tab handed the user the window they were already looking at.
+    /// Same shape for an app left with only minimized windows under `Minimized windows: Hide`.
+    ///
+    /// So a placeholder, a phantom and a minimized window are all skipped: none of them is a window the user
+    /// can be looking at. Everything else the app owns counts, drawn or not — which keeps #5941 exact for the
+    /// filters that drop a whole app, and as coarse as it always was for the Spaces / Screens ones.
+    static func currentWindowIsDrawn(_ frontmostAppWindows: [FrontmostAppWindow]) -> Bool {
+        let candidates = frontmostAppWindows.filter { !$0.isWindowlessApp && !$0.isPhantom && !$0.isMinimized }
+        guard !candidates.isEmpty else { return true }
+        return candidates.contains { $0.visible }
     }
 
     /// Find the user's chosen window by id, returning its current index if visible.
