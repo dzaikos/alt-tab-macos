@@ -372,13 +372,17 @@ class Windows {
     static func cycleSelectedWindowIndex(_ step: Int, allowWrap: Bool = true) {
         guard let session = SwitcherSession.current else { return }
         guard list.contains(where: { shouldDisplay($0) }) else { return }
+        // `list` can shrink while the panel is open (a window closed), and the selection fix-up runs behind
+        // `switcherUiRefreshThrottler`, so a dispatched trackpad/key-repeat step can land here with
+        // `selectedIndex` past the end. Clamp like `SelectionResolver` will, instead of trapping.
+        let selectedIndex = min(session.selectedIndex, list.count - 1)
         session.userPickedSelection = true  // from here the selection is the USER's pick, not the default
         let nextIndex = selectedWindowIndexAfterCycling(step)
         // don't wrap-around at the end, if key-repeat
-        if (((step > 0 && nextIndex < session.selectedIndex) || (step < 0 && nextIndex > session.selectedIndex)) &&
+        if (((step > 0 && nextIndex < selectedIndex) || (step < 0 && nextIndex > selectedIndex)) &&
             (!allowWrap || ATShortcut.lastEventIsARepeat || !KeyRepeatTimer.timerIsSuspended))
                // don't cycle to another row, if !allowWrap
-               || (!allowWrap && list[nextIndex].rowIndex != list[session.selectedIndex].rowIndex) {
+               || (!allowWrap && list[nextIndex].rowIndex != list[selectedIndex].rowIndex) {
             return
         }
         updateSelectedAndHoveredWindowIndex(nextIndex)
