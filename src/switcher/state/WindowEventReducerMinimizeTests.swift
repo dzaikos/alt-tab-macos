@@ -223,6 +223,67 @@ final class WindowEventReducerMinimizeTests: XCTestCase {
         XCTAssertEqual(minimized(runner.state, backgroundTabWid), false,
             "the inactive tab must follow its active tab out of the minimized state")
     }
+
+    // MARK: - E. The on-screen bit that tab-grouping reads (#5954)
+
+    /// Every path that can move the bit, pinned: without these, each line carrying it from the OS to the
+    /// kernel could be deleted with the whole suite still green, which is how it shipped the first time.
+    /// The rule it feeds lives in `TabGroupResolver` (an on-screen window is nobody's background tab); here
+    /// we only prove the fact reaches it.
+    func testOrderInSetsTheOnScreenBitAndOrderOutClearsIt() {
+        var s = state([window(1, Self.chromePid, order: 0)], frontmost: Self.chromePid)
+        _ = WindowEventReducer.reduce(&s, .windowOrderedIn(wid: 1, now: 10, inSpaceTransition: false))
+        XCTAssertTrue(s.windows[0].isOrderedIn)
+        _ = WindowEventReducer.reduce(&s, .windowOrderedOut(wid: 1, inSpaceTransition: false))
+        XCTAssertFalse(s.windows[0].isOrderedIn)
+    }
+
+    /// A move or resize is NOT an order-out. Both arrive through the same reducer branch, with `orderedIn`
+    /// false meaning "this is not an order-in", so writing the bit from that parameter asserted that every
+    /// window being dragged said it had left the screen — and entering fullscreen is a resize storm, i.e.
+    /// exactly the moment the rule has to hold.
+    func testAMoveOrResizeLeavesTheOnScreenBitAlone() {
+        var s = state([window(1, Self.chromePid, order: 0)], frontmost: Self.chromePid)
+        _ = WindowEventReducer.reduce(&s, .windowOrderedIn(wid: 1, now: 10, inSpaceTransition: false))
+        _ = WindowEventReducer.reduce(&s, .windowMovedOrResized(wid: 1, inSpaceTransition: false))
+        XCTAssertTrue(s.windows[0].isOrderedIn)
+    }
+
+    /// The batched WindowServer query re-syncs the bit, which is the only correction for a window whose
+    /// order events we missed.
+    func testTheWindowServerQueryResyncsTheOnScreenBit() {
+        var s = state([window(1, Self.chromePid, order: 0)], frontmost: Self.chromePid)
+        _ = WindowEventReducer.reduce(&s, .windowOrderedIn(wid: 1, now: 10, inSpaceTransition: false))
+        _ = WindowEventReducer.reduce(&s, .windowServerStateRead([WsWindowSnapshot(wid: 1,
+            position: CGPoint(x: 0, y: 33), size: CGSize(width: 1470, height: 923),
+            isFullscreen: false, isVisible: false)]))
+        XCTAssertFalse(s.windows[0].isOrderedIn)
+    }
+
+    /// Discovery seeds it from the same WindowServer row it discriminated the window on. At cold start no
+    /// order event ever fires for a window that was already open, so without this seed the rule is unarmed
+    /// exactly when a whole desktop of same-frame windows arrives at once.
+    func testDiscoverySeedsTheOnScreenBit() {
+        var s = state([window(1, Self.chromePid, order: 0)], frontmost: Self.chromePid)
+        _ = WindowEventReducer.reduce(&s, .discoveryLanded(wid: 1, accepted: true, newlyTracked: true,
+            adoptedAsInactiveTab: false, queriedSpaceIds: [1], isOrderedIn: true, tabTitles: nil))
+        XCTAssertTrue(s.windows[0].isOrderedIn)
+    }
+
+    /// ...except for a window discovery already knows is a background tab: its row is stale, and we know the
+    /// answer. Same reasoning as the Space it is forced to give up.
+    func testAnAdoptedInactiveTabIsNeverSeededOnScreen() {
+        var s = state([window(1, Self.chromePid, order: 0)], frontmost: Self.chromePid)
+        _ = WindowEventReducer.reduce(&s, .discoveryLanded(wid: 1, accepted: true, newlyTracked: true,
+            adoptedAsInactiveTab: true, queriedSpaceIds: [1], isOrderedIn: true, tabTitles: nil))
+        XCTAssertFalse(s.windows[0].isOrderedIn)
+    }
+
+    /// The projection is the last link in the chain: the kernels see `TabWindow`, so a bit the projection
+    /// drops is a bit the rule never reads, and no kernel test can tell.
+    func testTheKernelProjectionCarriesTheOnScreenBit() {
+        var s = state([window(1, Self.chromePid, order: 0)], frontmost: Self.chromePid)
+        _ = WindowEventReducer.reduce(&s, .windowOrderedIn(wid: 1, now: 10, inSpaceTransition: false))
+        XCTAssertTrue(s.tabWindow(s.windows[0]).isOrderedIn)
+    }
 }
-
-

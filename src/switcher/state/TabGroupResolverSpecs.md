@@ -549,3 +549,20 @@ to backfill the Space onto the members it saw. Members linked by the other two p
 some later pass happened to re-run geometry over them — a state that is not a reconcile fixed point, which
 the convergence invariant reports. `normalizeGroupVisibility` now backfills every member from the
 representative, marked borrowed because it is our inference and not CGS evidence.
+
+### An on-screen window is nobody's background tab (#5954)
+
+Geometry infers a background tab from Space-lessness, and Space-lessness lies whenever our own Space data is
+wrong. The WindowServer's ordered-in bit settles it, and the two facts were measured against a real macOS tab
+group on macOS 26: a background tab reads ordered-OUT, `spaceTypeMask` 0, and no CGS Space, while its selected
+sibling and an unrelated window both read ordered-IN with a Space. So a member that reads Space-less while the
+WindowServer still shows it on screen is a real window whose membership we lost, never somebody's tab, and
+`TabWindow.isOrderedIn` is forwarded to both fold paths to refuse exactly those.
+
+The reporter's case: four Firefox windows at one frame, one entering fullscreen, three folded behind it, so
+the switcher showed one of the four and rotated which one. Firefox exposes no `AXTabGroup` (probed live), so
+the fullscreen clause was the only confirmation available and no AX read could ever dissolve the result.
+
+- **testOnScreenWindowsAreNotFoldedIntoAFullscreenNewcomer** — the reporter's four windows: no group forms.
+- **testAnOrderedOutTabIsStillFoldedIntoItsFullscreenWindow** — the genuine tab, ordered out and Space-less,
+  still folds; the bit is read alongside the Space, not instead of it.

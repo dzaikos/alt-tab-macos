@@ -32,6 +32,13 @@ struct TabWindow: Equatable {
     /// reads "holds a Space" as "genuinely on-screen" must see it: a brand-new active's claim rejected its
     /// group's ex-representative because of the Space WE lent it, orphaning it as a permanent stray tile (rec20).
     var spaceIsBorrowed: Bool = false
+    /// The WindowServer says this window is ON SCREEN right now (its ordered-in bit). Genuine OS evidence,
+    /// forwarded rather than masked. It is the one fact that separates a background TAB from a window that
+    /// merely lost its Space membership — measured on macOS 26 against a real tab group: the background tab
+    /// reads ordered-OUT, `spaceTypeMask` 0, no CGS Space; its selected sibling and an unrelated window both
+    /// read ordered-IN with a Space. Defaults false ("not known to be on screen"), the reading that leaves
+    /// every existing decision unchanged.
+    var isOrderedIn = false
     /// MRU position (0 = most recently focused). The AUTHORITATIVE signal for which member of a group is its
     /// active tab: focusing a tab makes it active, by definition. `isTabbed` can't answer that — it's the
     /// thing tab detection derives, so trusting it to pick the visible is circular.
@@ -326,7 +333,14 @@ enum TabGroupResolver {
                 ?? onScreen.first else { return nil }
         // A HELD or BORROWED-Space member counts as background despite the Space it shows — the shared
         // `hasGenuineSpace` rule, the same one `matchSiblings` reads on the title path.
-        var background = members.filter { !hasGenuineSpace($0) && $0.wid != visible.wid }
+        //
+        // ...but a member the WindowServer still shows ON SCREEN is not anybody's background tab, whatever
+        // its Space membership says. A real background tab is ordered OUT — the OS draws one tab of a tabbed
+        // window, never two — so an ordered-IN member that merely reads Space-less is a real window whose
+        // membership we lost, and folding it hides a window the user is looking at (#5954: four same-frame
+        // Firefox windows, one entering fullscreen, three folded behind it). Space-lessness and this bit
+        // disagree only when our Space data is wrong, so believe the WindowServer.
+        var background = members.filter { !hasGenuineSpace($0) && !$0.isOrderedIn && $0.wid != visible.wid }
         // An UNSETTLED visible (2+ Spaces — mid-transition) may not fold anything. Folding says "every other
         // member is a tab of the window the visible belongs to", which is a claim ABOUT THE VISIBLE'S SPACE —
         // and an unsettled window has no Space that is evidence (the precondition at the top of this file).
@@ -352,6 +366,7 @@ enum TabGroupResolver {
             let foldSpace = members.compactMap { settledSpace($0) }.first
             for m in members where m.wid != visible.wid && !background.contains(where: { $0.wid == m.wid })
                 && (m.spaceIds.isEmpty || settledSpace(m) == foldSpace)
+                && !m.isOrderedIn  // the same rule as above: an on-screen window is nobody's background tab
                 && !isSplitViewPartner(m, visible: visible) {
                 background.append(m)
             }
@@ -598,6 +613,12 @@ enum TabGroupResolver {
                     // duplicate titles) was claimed to fill a title whose real tab has no window (Finder
                     // destroys a backgrounded tab's window), and vanished from the switcher.
                     && (s.isTabbed || s.spaceIds.isEmpty || (spaceIsOurAnnotation(s) && sizesMatch(active, s)))
+                    // ...and the same rule the geometry path applies, stated twice as this file requires: a
+                    // candidate the WindowServer still shows ON SCREEN is a real window, never somebody's
+                    // inactive tab, whatever its Space says (a background tab is ordered OUT — measured). An
+                    // already-TABBED candidate is exempt: it is drawn as its own group's representative, so
+                    // being on screen is exactly what it should be, and re-linking it is this path's job.
+                    && (s.isTabbed || !s.isOrderedIn)
                     // A GENUINELY-FULLSCREEN candidate is never claimable: the fullscreen Space invariant
                     // says it is its own window (plus its own tabs) on its own Space — a windowed group's
                     // tab can never be a fullscreen window. Without this, switching Spaces TO a fullscreen

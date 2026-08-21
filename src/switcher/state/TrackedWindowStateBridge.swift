@@ -114,7 +114,7 @@ class TrackedWindowStateBridge {
             isFullscreen: w.isFullscreen, isFullscreenMirrored: w.isFullscreenMirrored,
             isMinimized: w.isMinimized, isMainWindow: w.isMainWindow,
             isWindowlessApp: w.isWindowlessApp, cgsPhantomLatch: w.cgsPhantomLatch,
-            lastLeftSpaceId: w.lastLeftSpaceId,
+            isOrderedIn: w.isOrderedIn, lastLeftSpaceId: w.lastLeftSpaceId,
             replacedByWid: w.replacedByWid, replacedWid: w.replacedWid, tabCount: w.tabCount,
             focusedAt: w.focusedAt, lastFocusOrder: w.lastFocusOrder, creationOrder: w.creationOrder,
             hasThumbnail: w.thumbnail != nil)
@@ -170,6 +170,7 @@ class TrackedWindowStateBridge {
             if w.replacedByWid != mw.replacedByWid { w.replacedByWid = mw.replacedByWid }
             if w.replacedWid != mw.replacedWid { w.replacedWid = mw.replacedWid }
             if w.tabCount != mw.tabCount { w.tabCount = mw.tabCount }
+            if w.isOrderedIn != mw.isOrderedIn { w.isOrderedIn = mw.isOrderedIn }
         }
     }
 

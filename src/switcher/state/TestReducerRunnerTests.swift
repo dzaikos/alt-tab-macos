@@ -41,7 +41,7 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.spaceMembershipChanged(wid: 100, spaceId: 3, added: false, now: 10.1, inSpaceTransition: false)),
             .track(window(101, spaceIds: [3])),
             .input(.discoveryLanded(wid: 101, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [3], tabTitles: ["~", "~"])),
+                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: ["~", "~"])),
             .input(.holdReleaseCheck(wid: 100, attempt: 0)),
         ])
         XCTAssertEqual(harness.violations, [])
@@ -167,7 +167,7 @@ final class TestReducerRunnerTests: XCTestCase {
                 isMinimized: false, isMainWindow: false, isWindowlessApp: false, cgsPhantomLatch: false,
                 lastLeftSpaceId: nil, lastFocusOrder: 0, creationOrder: 5, hasThumbnail: true)),
             .input(.discoveryLanded(wid: 5, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [100], tabTitles: nil)),
+                                    queriedSpaceIds: [100], isOrderedIn: true, tabTitles: nil)),
         ])
         XCTAssertEqual(harness.violations, [])
         XCTAssertEqual(harness.state.window(5)?.spaceIds, [100])
@@ -292,7 +292,7 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.spaceMembershipChanged(wid: 10, spaceId: 1, added: false, now: 100.01, inSpaceTransition: false)),
             .track(win(99, size: CGSize(width: 1440, height: 900), spaceIds: [100], fullscreen: true, focus: 0)),
             .input(.discoveryLanded(wid: 99, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [100], tabTitles: nil)),
+                                    queriedSpaceIds: [100], isOrderedIn: true, tabTitles: nil)),
         ])
         XCTAssertEqual(harness.violations, [])
         XCTAssertNil(harness.state.groups.groupId(of: 99).flatMap { gid in
@@ -334,7 +334,7 @@ final class TestReducerRunnerTests: XCTestCase {
                 isWindowlessApp: false, cgsPhantomLatch: false, lastLeftSpaceId: nil, lastFocusOrder: 0,
                 creationOrder: 134, hasThumbnail: true)),
             .input(.discoveryLanded(wid: 134, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [22], tabTitles: nil)),
+                                    queriedSpaceIds: [22], isOrderedIn: true, tabTitles: nil)),
         ])
         XCTAssertEqual(harness.violations, [], "convergence: \(harness.trace)")
         // The switched-to tab represents its group — the switcher shows "Movies", not a background sibling.
@@ -493,7 +493,7 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.windowFocused(wid: 100, now: 10.1)),
             .track(window(150, pid: 600, spaceIds: [3])),
             .input(.discoveryLanded(wid: 150, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [3], tabTitles: nil)),
+                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: nil)),
         ])
         XCTAssertEqual(harness.violations, [])
         XCTAssertEqual(harness.state.window(100)?.lastFocusOrder, 0, "the window focused during the gap keeps the front")
@@ -514,7 +514,7 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.windowOrderedIn(wid: 150, now: 10.0, inSpaceTransition: false)),
             .track(window(150, pid: 600, spaceIds: [3])),
             .input(.discoveryLanded(wid: 150, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [3], tabTitles: nil)),
+                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: nil)),
         ])
         XCTAssertEqual(harness.violations, [])
         XCTAssertEqual(harness.state.window(100)?.lastFocusOrder, 0)
@@ -719,7 +719,7 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.spaceMembershipChanged(wid: 100, spaceId: 3, added: false, now: 10.01, inSpaceTransition: false)),
             .track(window(900, spaceIds: [3])),
             .input(.discoveryLanded(wid: 900, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [3], tabTitles: nil)),
+                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: nil)),
         ])
         XCTAssertEqual(harness.state.window(100)?.replacedByWid, 900)
         XCTAssertEqual(harness.state.window(900)?.replacedWid, 100)
@@ -738,7 +738,7 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.spaceMembershipChanged(wid: 100, spaceId: 3, added: false, now: 10.01, inSpaceTransition: false)),
             .track(window(900, pid: 700, spaceIds: [3])),
             .input(.discoveryLanded(wid: 900, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [3], tabTitles: nil)),
+                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: nil)),
         ])
         XCTAssertNil(harness.state.window(100)?.replacedByWid)
         XCTAssertNil(harness.state.window(900)?.replacedWid)
@@ -773,7 +773,7 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.spaceMembershipChanged(wid: 900, spaceId: 3, added: true, now: 10.0, inSpaceTransition: false)),
             .input(.spaceMembershipChanged(wid: 100, spaceId: 3, added: false, now: 10.01, inSpaceTransition: false)),
             .input(.discoveryLanded(wid: 900, accepted: false, newlyTracked: false, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [], tabTitles: nil)),
+                                    queriedSpaceIds: [], isOrderedIn: true, tabTitles: nil)),
         ])
         XCTAssertNil(harness.state.carried.pendingHandoverEdge[900])
         XCTAssertNil(harness.state.carried.pendingGroupInheritance[900])

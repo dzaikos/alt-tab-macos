@@ -121,3 +121,22 @@ Mirrors `WindowEventReducerMinimizeTests.swift` 1:1.
 
 That the live Dock path emits the 815 at all, and that every queryable source lags it. Both are OS facts;
 they were established by measurement (above) and are re-checked by QA I-15 / I-16, not here.
+
+### E. The on-screen bit that tab-grouping reads (#5954)
+
+`TrackedWindow.isOrderedIn` is the WindowServer's ordered-in bit, and `TabGroupResolver` reads it to refuse
+folding a window the OS still shows (an on-screen window is nobody's background tab — a real background tab
+is ordered OUT, measured). The kernel rule has its own tests; these pin the PLUMBING, because every line
+carrying the bit from the OS to the kernel could be deleted with the suite green otherwise.
+
+- **testOrderInSetsTheOnScreenBitAndOrderOutClearsIt** — the 815/816 pair moves it.
+- **testAMoveOrResizeLeavesTheOnScreenBitAlone** — a 806/807 shares that reducer branch with `orderedIn:
+  false` meaning "not an order-in", and must not be read as "off screen"; entering fullscreen is a resize
+  storm, which is precisely when the rule has to hold.
+- **testTheWindowServerQueryResyncsTheOnScreenBit** — the batched query corrects a window whose order events
+  were missed.
+- **testDiscoverySeedsTheOnScreenBit** — seeded from the row discovery already holds, since no order event
+  fires for windows that were open before AltTab started.
+- **testAnAdoptedInactiveTabIsNeverSeededOnScreen** — except for a known background tab, whose row is stale.
+- **testTheKernelProjectionCarriesTheOnScreenBit** — `tabWindow` forwards it, the last link no kernel test
+  can check.

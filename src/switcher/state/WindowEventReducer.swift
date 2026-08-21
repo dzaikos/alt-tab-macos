@@ -146,13 +146,24 @@ enum WindowEventReducer {
             // the same millisecond as the Space notification, the exit's 815s came 519ms BEFORE it). Skipping
             // them here would leave the re-show indistinguishable from a raise, which is the whole point.
             state.carried.offScreen.insert(wid)
+            // Same reason `offScreen` is recorded above the transition guard: the bit describes the WHOLE
+            // order-out stream, including the ones a Space switch causes, so it stays true to the
+            // WindowServer rather than to our interpretation of it. Tab-grouping READS this bit, so the pass
+            // that owns grouping runs when it flips — leaving it changed without reconciling is a state no
+            // later input converges from (the harness's fixed-point check catches exactly that). This is the
+            // geometry/normalize pass, NOT the AX tab re-read the comment below rules out.
+            var orderedOutEffects = [ReducerEffect]()
+            if let i = state.windowIndex(wid) {
+                state.windows[i].isOrderedIn = false
+                orderedOutEffects = reconcile(&state)
+            }
             // A tracked window left the screen: closed, or merely minimized / hidden / moved to another
             // Space. WS's destroy event (804) lags a real close by seconds — or never fires — for apps
             // that retain the CGWindow (Finder), so we can't wait for it; the AX element dies within
             // ~20ms. Probe AX: dead ⇒ closed ⇒ remove now; alive ⇒ just off-screen ⇒ keep. Skip during
             // a Space transition — then an order-out is just the leaving Space's windows going off
             // -screen, not a close, and the post-transition syncSpacesState reconcile covers it.
-            guard state.window(wid) != nil, !inSpaceTransition else { return [] }
+            guard state.window(wid) != nil, !inSpaceTransition else { return orderedOutEffects }
             // Minimize has no dedicated WS event — it surfaces as an order-out that isn't a close — so ASK
             // the WindowServer what state the window is in now. `WsWindowState.minimizedTag` answers it and
             // sets ~35ms after the minimize, while this order-out arrives ~500ms in (the animation), so the
@@ -165,7 +176,7 @@ enum WindowEventReducer {
             // mid-transition, so a transient empty read would wrongly dissolve the tab
             // group and strand its inactive tabs as phantoms (the fullscreen-tab
             // disappearance). Order-out never changes tab membership anyway.
-            return [.probeWindowLiveness(wid), .queryWindowServerState(wids: [wid], throttled: false),
+            return orderedOutEffects + [.probeWindowLiveness(wid), .queryWindowServerState(wids: [wid], throttled: false),
                     .readTitleAndTabs(wid: wid, readTabs: false)]
         case .windowFocused(let wid, let now):
             return windowFocused(&state, wid: wid, now: now)
@@ -181,9 +192,11 @@ enum WindowEventReducer {
         case .systemReshow(let now, let source):
             state.carried.systemReshowMuteUntil = now + systemReshowMute(source)
             return []
-        case .discoveryLanded(let wid, let accepted, let newlyTracked, let adoptedAsInactiveTab, let queriedSpaceIds, let tabTitles):
+        case .discoveryLanded(let wid, let accepted, let newlyTracked, let adoptedAsInactiveTab, let queriedSpaceIds,
+                              let isOrderedIn, let tabTitles):
             return discoveryLanded(&state, wid: wid, accepted: accepted, newlyTracked: newlyTracked,
-                adoptedAsInactiveTab: adoptedAsInactiveTab, queriedSpaceIds: queriedSpaceIds, tabTitles: tabTitles)
+                adoptedAsInactiveTab: adoptedAsInactiveTab, queriedSpaceIds: queriedSpaceIds,
+                isOrderedIn: isOrderedIn, tabTitles: tabTitles)
         case .titleAndTabsRead(let wid, let tabTitles, let reconcileTabs, let changedSoFar):
             return titleAndTabsRead(&state, wid: wid, tabTitles: tabTitles, reconcileTabs: reconcileTabs,
                 changedSoFar: changedSoFar)
@@ -242,6 +255,12 @@ enum WindowEventReducer {
         }
         if let window = state.window(wid) {
             var effects: [ReducerEffect] = [.queryWindowServerState(wids: [wid], throttled: true)]
+            // An order-in IS the ordered-in bit turning on, so it is recorded here rather than waiting for the
+            // batched query the effect above schedules — tab-grouping runs on this pass. Only on the order-in:
+            // this function also serves 806/807 move/resize (`orderedIn: false` there, meaning "not an
+            // order-in", NOT "off screen"), so writing the flag unconditionally asserted that every window
+            // being dragged or resized had left the screen. The 816 clears the bit, in its own branch.
+            if orderedIn, let i = state.windowIndex(wid) { state.windows[i].isOrderedIn = true }
             if orderedIn {
                 effects.append(.readTitleAndTabs(wid: wid, readTabs: false))
                 // An order-in of a window we believe is MINIMIZED is the un-minimize, and the WindowServer is
@@ -866,7 +885,8 @@ enum WindowEventReducer {
     /// update with the newly-CREATED gate, the reconcile, the adopted-tab convergence, the re-render.
     private static func discoveryLanded(_ state: inout TrackedWindowState, wid: CGWindowID, accepted: Bool,
                                         newlyTracked: Bool, adoptedAsInactiveTab: Bool,
-                                        queriedSpaceIds: [UInt64], tabTitles: [String]?) -> [ReducerEffect] {
+                                        queriedSpaceIds: [UInt64], isOrderedIn: Bool,
+                                        tabTitles: [String]?) -> [ReducerEffect] {
         // A REJECTED wid the OS has just CREATED is not a dead wid: the OS publishes a window — and every new
         // tab — at 0×0 and sizes it a beat later, so the create-time discovery is rejected on the min-size
         // filter and the SAME wid comes back through its first move/resize, accepted (`.windowCreated` says
@@ -955,6 +975,15 @@ enum WindowEventReducer {
             if let at = [promotionAt, createdAt].compactMap({ $0 }).max() {
                 effects.append(.log(state.mruBumpLog(wid)))
                 _ = state.noteFocus(wid, at: at)
+            }
+            // Seed the ordered-in bit from the same WindowServer row this discovery was discriminated on.
+            // Without it the bit is false for every window that was already open when AltTab launched — no
+            // order event ever fires for those — so tab-grouping's "an on-screen window is nobody's
+            // background tab" rule would be unarmed exactly at cold start, which is when a whole desktop of
+            // same-frame windows is discovered at once. Forced false for a tab we already know is in the
+            // background, like its Space below.
+            if let i = state.windowIndex(wid) {
+                state.windows[i].isOrderedIn = isOrderedIn && !adoptedAsInactiveTab
             }
             // Override Window.init's current-Space default with the real Space resolved off-main (new
             // windows only; existing ones stay live via events / spacesSynced).
@@ -1122,10 +1151,15 @@ enum WindowEventReducer {
             guard let i = state.windowIndex(snap.wid) else { continue }
             var changed = state.windows[i].position != snap.position || state.windows[i].size != snap.size
                 || state.windows[i].isFullscreen != snap.isFullscreen
+                || state.windows[i].isOrderedIn != snap.isVisible
             state.windows[i].position = snap.position
             state.windows[i].size = snap.size
             state.windows[i].isFullscreen = snap.isFullscreen
             state.windows[i].isFullscreenMirrored = false
+            // The ordered-in bit, straight from the same snapshot. Tab-grouping reads it to refuse folding a
+            // window the WindowServer still shows on screen (see `TrackedWindow.isOrderedIn`); it is not a
+            // visibility decision of ours, so it is written whatever else this snapshot says.
+            state.windows[i].isOrderedIn = snap.isVisible
             // Minimized comes from this query now rather than from an AX read into the window's own app.
             // The bit is prompt on the way IN (~35ms) but LATE on the way OUT — on a Dock restore it only
             // clears when the animation ends, ~644ms after the order-in that already put the window back on

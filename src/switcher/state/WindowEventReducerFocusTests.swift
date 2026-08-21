@@ -83,7 +83,7 @@ final class WindowEventReducerFocusTests: XCTestCase {
             .input(.windowFocused(wid: Self.reaperDialogWid, now: 13.634)),
             .track(window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 0)),
             .input(.discoveryLanded(wid: Self.reaperDialogWid, accepted: true, newlyTracked: true,
-                adoptedAsInactiveTab: false, queriedSpaceIds: [4], tabTitles: nil)),
+                adoptedAsInactiveTab: false, queriedSpaceIds: [4], isOrderedIn: true, tabTitles: nil)),
             // 13:28:14.96 — the click on the dialog's button brings REAPER to the front.
             .setAppActive(pid: Self.finderPid, isActive: false),
             .setAppActive(pid: Self.reaperPid, isActive: true),

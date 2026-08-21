@@ -39,6 +39,18 @@ struct TrackedWindow: Equatable {
     /// the latched CGS phantom verdict (`Window.storedState.isPhantom`); the user-facing value is
     /// `TrackedWindowState.isPhantom(_:)`, derived at read like the live `Window.isPhantom`
     var cgsPhantomLatch = false
+    /// The WindowServer's ordered-in bit (`WsWindowState.isVisible`): this window is ON SCREEN right now.
+    /// Genuine OS evidence like `lastLeftSpaceId`, not an annotation, so the kernel projection forwards it.
+    ///
+    /// It is what separates a background TAB from a window that merely lost its Space membership, which is a
+    /// distinction geometry alone cannot make and which #5954 turned on. Measured on macOS 26 by building a
+    /// real tab group: the background tab reads ordered-OUT with `spaceTypeMask` 0 and no CGS Space, while
+    /// its selected sibling and an unrelated window both read ordered-IN, `spaceTypeMask` 1, with a Space.
+    /// So an on-screen window is never somebody's background tab, whatever the Space query says about it.
+    ///
+    /// Defaults FALSE = "not known to be on screen", which is the reading that changes no existing decision:
+    /// every rule below only ever refuses a fold on a TRUE.
+    var isOrderedIn = false
     /// The Space this window most recently LEFT (from a 1326), cleared when it joins one again. HISTORY, and
     /// the only thing that distinguishes a tab which just backgrounded inside window A from a brand-new tab
     /// of window B: by current facts both are merely Space-less, same app, same size, unlinked. Genuine CGS
@@ -400,6 +412,7 @@ struct TrackedWindowState: Equatable {
             isMinimized: w.isMinimized, tabbedSiblingWids: table.siblingWids(of: wid),
             isHeld: held.contains(wid),
             spaceIsBorrowed: w.spaceIsBorrowed,
+            isOrderedIn: w.isOrderedIn,
             lastFocusOrder: w.lastFocusOrder,
             lastLeftSpaceId: w.lastLeftSpaceId,
             // Genuine event evidence, like `lastLeftSpaceId` and unlike `isHeld`/`spaceIsBorrowed`: the two
@@ -696,8 +709,13 @@ enum ReducerInput: Equatable {
     /// `accepted` is whether a window was (or already is) tracked for the wid, `newlyTracked` whether this
     /// call appended it (`findOrCreate.1`). The shell has already applied the raw AX/WS attributes and
     /// appended the window to the snapshot; the reducer owns the decisions that follow.
+    /// `isOrderedIn` comes from the same WindowServer row the discovery was discriminated on — the bit has
+    /// no other way in at launch, where every window arrives through here and no order event ever fires for
+    /// windows that were already open. An adopted inactive tab is forced FALSE for the same reason its Space
+    /// is (`adoptedAsInactiveTab`): we already know it is a background tab, and its row is stale.
     case discoveryLanded(wid: CGWindowID, accepted: Bool, newlyTracked: Bool,
-                         adoptedAsInactiveTab: Bool, queriedSpaceIds: [UInt64], tabTitles: [String]?)
+                         adoptedAsInactiveTab: Bool, queriedSpaceIds: [UInt64], isOrderedIn: Bool,
+                         tabTitles: [String]?)
     /// The apply-side of `Applications.refreshWindowTitleAndTabs` (title/main already applied by the shell;
     /// `changedSoFar` = whether they changed): the reducer owns the tab reconcile. Carries NO minimized
     /// fact — that comes from the WindowServer query now (`WsWindowState.minimizedTag`).

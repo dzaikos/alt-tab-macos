@@ -60,6 +60,9 @@ class Window {
     /// cannot answer what a wid can.
     var replacedByWid: CGWindowID?
     var replacedWid: CGWindowID?
+    /// The WindowServer's ordered-in bit: this window is on screen right now. Owned by the reducer; see
+    /// `TrackedWindow.isOrderedIn` for the measurement that makes it the tab-vs-window discriminator.
+    var isOrderedIn = false
     /// Tab-button count from this window's last AXTabGroup read (0 = none / not tabbed). Owned by the
     /// reducer; see `TabWindow.tabCount` for why the COUNT is trusted where the tab TITLES are not.
     var tabCount = 0

@@ -363,7 +363,7 @@ struct TestInteractionModel {
     /// free to order units, and a rejection arriving after its own acceptance is not a real ordering.
     private static func rejectedZeroSizedLanding(_ wid: CGWindowID) -> TestReducerRunner.Step {
         .input(.discoveryLanded(wid: wid, accepted: false, newlyTracked: false, adoptedAsInactiveTab: false,
-            queriedSpaceIds: [], tabTitles: nil))
+            queriedSpaceIds: [], isOrderedIn: true, tabTitles: nil))
     }
 
     private mutating func newWindow(pid: pid_t) -> ActionEvents {
@@ -390,7 +390,7 @@ struct TestInteractionModel {
         e.readUnits = [[Self.rejectedZeroSizedLanding(wid),
                         .track(trackedWindow(identity: identity, wid: wid, spaceIds: [windowedSpace])),
                         .input(.discoveryLanded(wid: wid, accepted: true, newlyTracked: true,
-                            adoptedAsInactiveTab: false, queriedSpaceIds: [windowedSpace], tabTitles: nil))]]
+                            adoptedAsInactiveTab: false, queriedSpaceIds: [windowedSpace], isOrderedIn: true, tabTitles: nil))]]
         e.ordered.append(.input(.windowFocused(wid: wid, now: tick())))
         return e
     }
@@ -422,12 +422,18 @@ struct TestInteractionModel {
         e.ordered = appSteps(world[wi].pid)
             + [.input(.windowCreated(wid: wid, now: tick(), inSpaceTransition: false)),
                .input(.spaceMembershipChanged(wid: wid, spaceId: space, added: true, now: tick(), inSpaceTransition: false)),
+               // The outgoing tab goes OFF SCREEN before it leaves the Space. Measured on macOS 26 with a
+               // per-window notification probe over a real tab group: `1325(incoming) → 816(outgoing) →
+               // 1326(outgoing) → 815(incoming)` on a switch, and `811 → 816 → 816 → 1326 → 1326` on Merge
+               // All Windows. The 816 was missing here, which made a modelled background tab look like it
+               // was still drawn — the one fact that separates a tab from a real window we lost the Space of.
+               .input(.windowOrderedOut(wid: oldWid, inSpaceTransition: false)),
                .input(.spaceMembershipChanged(wid: oldWid, spaceId: space, added: false, now: tick(), inSpaceTransition: false))]
         e.readUnits = [[Self.rejectedZeroSizedLanding(wid),
                         .track(trackedWindow(identity: identity, wid: wid, spaceIds: [space])),
                         .input(.discoveryLanded(wid: wid, accepted: true, newlyTracked: true,
                             adoptedAsInactiveTab: false, queriedSpaceIds: [space],
-                            tabTitles: world[wi].tabs.map { $0.title })),
+                            isOrderedIn: true, tabTitles: world[wi].tabs.map { $0.title })),
                         // the replacement landed, so the hold on the tab it displaced ends
                         .input(.holdReleaseCheck(wid: oldWid, attempt: 0))]]
         return e
@@ -468,6 +474,7 @@ struct TestInteractionModel {
                 [TestReducerRunner.Step.input(.spaceMembershipChanged(wid: $0, spaceId: space, added: false,
                     now: tick(), inSpaceTransition: false))] } ?? [])
             + [.input(.spaceMembershipChanged(wid: incomingWid, spaceId: space, added: true, now: tick(), inSpaceTransition: false)),
+               .input(.windowOrderedOut(wid: outgoingWid, inSpaceTransition: false)),   // see `openTab`
                .input(.spaceMembershipChanged(wid: outgoingWid, spaceId: space, added: false, now: tick(), inSpaceTransition: false))]
         if reuse {
             // the switch's frames are re-queried and the drag-out verdict fires (same frame ⇒ a tab switch)
@@ -567,7 +574,7 @@ struct TestInteractionModel {
                     + [.track(trackedWindow(identity: world[i].identity, wid: active.wid, spaceIds: [world[i].space])),
                        .input(.discoveryLanded(wid: active.wid, accepted: true, newlyTracked: true,
                            adoptedAsInactiveTab: false, queriedSpaceIds: [world[i].space],
-                           tabTitles: tabsReadable(world[i]) ? world[i].tabs.map { $0.title } : nil))]
+                           isOrderedIn: true, tabTitles: tabsReadable(world[i]) ? world[i].tabs.map { $0.title } : nil))]
                     // the tabs this discovery replaced can stop being held
                     + pendingHoldReleaseWids.map { .input(.holdReleaseCheck(wid: $0, attempt: 0)) })
                 pendingHoldReleaseWids = []
@@ -593,7 +600,7 @@ struct TestInteractionModel {
                 e.readUnits.append([.track(trackedWindow(identity: world[i].identity, wid: wid,
                         spaceIds: [], isFullscreen: false)),
                     .input(.discoveryLanded(wid: wid, accepted: true, newlyTracked: true,
-                        adoptedAsInactiveTab: true, queriedSpaceIds: [], tabTitles: nil))])
+                        adoptedAsInactiveTab: true, queriedSpaceIds: [], isOrderedIn: true, tabTitles: nil))])
             }
         }
         // The active tab's AXTabGroup read, WINDOWED ONLY — `tabsReadable` gates it, matching what

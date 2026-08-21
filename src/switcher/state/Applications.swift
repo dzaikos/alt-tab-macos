@@ -246,7 +246,8 @@ class Applications {
                     findOrCreate.0?.isMainWindow = a.isMain ?? false
                     TrackedWindowStateBridge.dispatch(.discoveryLanded(wid: wid, accepted: findOrCreate.0 != nil,
                         newlyTracked: findOrCreate.1, adoptedAsInactiveTab: adoptedAsInactiveTab,
-                        queriedSpaceIds: spaceIds, tabTitles: tabSiblingTitles))
+                        queriedSpaceIds: spaceIds, isOrderedIn: WsWindowState.isVisible(raw),
+                        tabTitles: tabSiblingTitles))
                 }
             }
         }

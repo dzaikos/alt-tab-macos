@@ -10,10 +10,11 @@ final class TabGroupResolverTests: XCTestCase {
                     position: CGPoint? = CGPoint(x: 100, y: 100), spaceIds: [UInt64] = [1],
                     title: String = "", isTabbed: Bool = false, isFullscreen: Bool = false,
                     isMinimized: Bool = false, tabbedSiblingWids: [CGWindowID]? = nil,
-                    lastFocusOrder: Int = 0, tabCount: Int = 0) -> TabWindow {
+                    isOrderedIn: Bool = false, lastFocusOrder: Int = 0, tabCount: Int = 0) -> TabWindow {
         TabWindow(pid: pid, wid: wid, size: size, position: position, spaceIds: spaceIds, title: title,
             isTabbed: isTabbed, isFullscreen: isFullscreen, isMinimized: isMinimized,
-            tabbedSiblingWids: tabbedSiblingWids, lastFocusOrder: lastFocusOrder, tabCount: tabCount)
+            tabbedSiblingWids: tabbedSiblingWids, isOrderedIn: isOrderedIn,
+            lastFocusOrder: lastFocusOrder, tabCount: tabCount)
     }
 
     // MARK: - A. geometryGroups
@@ -32,6 +33,33 @@ final class TabGroupResolverTests: XCTestCase {
         // has no `tabbedSiblingWids`. The fullscreen exemption still groups its Space-less background tab.
         let visible = tw(wid: 1, spaceIds: [1], isFullscreen: true)
         let background = tw(wid: 2, spaceIds: [])
+        XCTAssertEqual(TabGroupResolver.geometryGroups([visible, background]),
+            [GeometryGroup(visibleWid: 1, backgroundWids: [2])])
+    }
+
+    func testOnScreenWindowsAreNotFoldedIntoAFullscreenNewcomer() {
+        // #5954, from the reporter's `--detailed-list`: four Firefox windows at one frame (1147x719 @ 0,26),
+        // one of them entering fullscreen, the other three reading Space-less. Geometry folded the three
+        // behind the newcomer and the switcher showed ONE of the four — "a window is missing, and when it
+        // comes back a different one goes missing". Firefox exposes no AXTabGroup (probed live), so the
+        // fullscreen clause is the only confirmation available and nothing could ever dissolve the result.
+        // The WindowServer's ordered-in bit is what the fold was missing: a real background tab is ordered
+        // OUT, so an on-screen member is a real window whose Space membership we lost, not a tab.
+        let size = CGSize(width: 1147, height: 719), pos = CGPoint(x: 0, y: 26)
+        let goingFullscreen = tw(wid: 54689, size: size, position: pos, spaceIds: [9], isFullscreen: true,
+            isOrderedIn: true, lastFocusOrder: 0)
+        let verge = tw(wid: 34920, size: size, position: pos, spaceIds: [], isOrderedIn: true, lastFocusOrder: 1)
+        let youtube = tw(wid: 34919, size: size, position: pos, spaceIds: [], isOrderedIn: true, lastFocusOrder: 2)
+        let ipass = tw(wid: 34927, size: size, position: pos, spaceIds: [], isOrderedIn: true, lastFocusOrder: 3)
+        XCTAssertEqual(TabGroupResolver.geometryGroups([goingFullscreen, verge, youtube, ipass]), [])
+    }
+
+    func testAnOrderedOutTabIsStillFoldedIntoItsFullscreenWindow() {
+        // The other side, and the reason the bit is read rather than the Space alone: a genuine background
+        // tab of a fullscreen window is ordered OUT and Space-less, and must still fold — this is
+        // `testFullscreenVisibleGroupsWithoutAxConfirmation`'s shape with the bit spelled out.
+        let visible = tw(wid: 1, spaceIds: [1], isFullscreen: true, isOrderedIn: true)
+        let background = tw(wid: 2, spaceIds: [], isOrderedIn: false)
         XCTAssertEqual(TabGroupResolver.geometryGroups([visible, background]),
             [GeometryGroup(visibleWid: 1, backgroundWids: [2])])
     }

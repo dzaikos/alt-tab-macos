@@ -46,6 +46,37 @@ final class TrackedWindowStateFieldsTests: XCTestCase {
             """)
     }
 
+    /// Every stored property of `TrackedWindow`, the per-window half of the same trap. `snapshot()` builds
+    /// each one from the live `Window` and `apply()` writes it back, so a field missing from EITHER side is
+    /// inert in the app while every replay test stays green (the harness threads one state and never crosses
+    /// the bridge).
+    ///
+    /// **This is an ADD-ONLY tripwire, and that is all it is.** Reflection sees the property, not the two
+    /// bridge lines, so DELETING either one still passes here — verified by mutation. What it buys is the
+    /// moment that matters in practice: adding a field fails this test, which is where you are told the
+    /// bridge exists at all. Pinning the copies themselves needs a behavioural test per field, and the ones
+    /// for `isOrderedIn` live in `WindowEventReducerMinimizeTests` section E.
+    private static let trackedWindowFields: Set<String> = [
+        // identity / shell-owned: not written back by `apply()`, see its comment for why
+        "id", "wid", "pid", "title", "isWindowlessApp", "creationOrder", "hasThumbnail",
+        // reducer-owned: must be in BOTH `modelWindow()` and `apply()`
+        "size", "position", "spaceIds", "spaceIndexes", "isOnAllSpaces", "spaceIsBorrowed",
+        "isFullscreen", "isFullscreenMirrored", "isMinimized", "isMainWindow", "cgsPhantomLatch",
+        "isOrderedIn", "lastLeftSpaceId", "replacedByWid", "replacedWid", "tabCount",
+        "focusedAt", "lastFocusOrder",
+    ]
+
+    func testEveryTrackedWindowFieldIsAccountedForByTheBridge() {
+        let fields = Set(Mirror(reflecting: TrackedWindow(id: "wid-1", pid: 1)).children.compactMap { $0.label })
+        XCTAssertFalse(fields.isEmpty, "reflection found no stored properties — the check would pass vacuously")
+        XCTAssertEqual(fields.subtracting(Self.trackedWindowFields), [], """
+            new TrackedWindow field(s). Copy them in BOTH `TrackedWindowStateBridge.modelWindow()` and \
+            `apply()`, then list them here — a field missing from either side reads as its default on every \
+            dispatch, and no replay test can see it.
+            """)
+        XCTAssertEqual(Self.trackedWindowFields.subtracting(fields), [], "listed here but no longer stored")
+    }
+
     /// The classification's other half: a name listed here that no longer exists is a stale claim, and would
     /// quietly excuse a future field that happens to reuse the name.
     func testNoClassifiedFieldHasBeenRemovedOrRenamed() {
