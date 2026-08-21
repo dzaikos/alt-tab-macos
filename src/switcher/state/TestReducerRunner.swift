@@ -156,7 +156,8 @@ final class TestReducerRunner {
         case .deferCaptureUntilRestoreEnds(let wid):
             deferredCaptures.append(wid)
         case .copyThumbnail, .applyFocus, .updateScreenId, .removeWindowlessPlaceholder,
-             .addWindowlessPlaceholder, .bumpFocusViaAxBackstop, .checkShortcutsForFocusedWindow:
+             .addWindowlessPlaceholder, .bumpFocusViaAxBackstop, .resolveFocusAfterBurst,
+             .checkShortcutsForFocusedWindow:
             break  // display/AppKit-side; no model content beyond what the reducer already wrote
         }
     }
@@ -203,6 +204,7 @@ final class TestReducerRunner {
         switch input {
         case .windowCreated(_, let now, _), .windowOrderedIn(_, let now, _),
              .windowFocused(_, let now), .appActivated(_, let now, _),
+             .altTabFocusedWindowInFrontmostApp(_, _, let now),
              .spaceMembershipChanged(_, _, _, let now, _):
             return now
         default:

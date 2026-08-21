@@ -136,3 +136,95 @@ harmless one (the frontmost app's front window, at MRU 0 in both captures).
 - **testRestoringAMinimizedWindowDuringTheMuteStillBumps** — an un-minimize is spared, as it is spared the
   `cameBackOnScreen` exclusion: a wake leaves minimized windows minimized, and a Dock restore inside the
   frontmost app emits ONLY that order-in, so a swallowed bump would never be corrected (#5439).
+
+### E. An app raising ALL its windows while already frontmost (#5974)
+
+The report: a notification banner arrives, the app brings its whole window set to the front, and every other
+app is pushed under it — "Alt-Tab's Z-order is broken". Measured on macOS 26.6 (2026-08-21), the app emits
+one 808 plus one 815 per window, 29ms apart, and **no `didActivateApplication` at all**. With no activation
+entry to consult, each 808 falls through to "bump iff the app is active" and walks its window to the top:
+
+```
+BEFORE  C1(0)  SystemSettings(1)  C2(2)  Claude(3)  C3(4)
+18:26:01.417 windowFocused   #51249 | mru bump #51249 from=4
+18:26:01.417 windowOrderedIn #51249 | mru bump #51249 from=0
+18:26:01.446 windowFocused   #51241 | mru bump #51241 from=3
+18:26:01.446 windowFocused   #51228 | mru bump #51228 from=2
+18:26:01.446 windowOrderedIn #51228 | mru bump #51228 from=0
+AFTER   C1(0)  C2(1)  C3(2)  SystemSettings(3)  Claude(4)
+```
+
+**The bit that separates a focus from a raise is not in the event stream and not in the WindowServer.** The
+808 payload is 4 bytes (the wid) and is byte-identical for both; probing ids 800-830 found no sibling that
+fires only on a real focus. The WindowServer models no "key window": `SLSWindowIteratorGetTags` and
+`GetAttributes` read byte-identical across key vs non-key, across a raise that changed z-order, and across
+the app being active vs inactive, and every focus getter SkyLight exports is process-scoped. z-order cannot
+stand in for it either — a raise-all leaves the LAST window raised on top, not the one holding keys.
+
+So this is deliberately **not** another timing guard. `focusBurstGap` (100ms) only says "judgement is
+suspended for this app"; the verdict comes from the one oracle that knows, the app's own `kAXFocusedWindow`,
+read once the run goes quiet (`.resolveFocusAfterBurst` → `.focusBurstResolved`). The timer chooses WHEN to
+read, never WHAT the answer is — which is what separates this from the two burst-SHAPE attempts that were
+reverted (`9f60c241`), where a threshold had to tell a raise tail's 118-334ms lag from a 219ms human action.
+
+100ms sits between the two measured populations: an app raising its own windows one at a time is 29ms apart,
+and the fastest human action in any capture is 219ms (#5785). It is far wider than the 815 path's
+`reshowBurstGap` (5ms), which measures a WindowServer re-show at ~0.12ms between members.
+
+Three properties make the answer expressible where a bump-based rule could not reach it. The read may say
+**nobody moved**, which is the correct answer here and is why the run's first member carries a rollback: that
+first 808 is bumped before anything could reveal a run, and in the capture it was the window at MRU 4. The
+rollback restores the RANK as well as the timestamp — ranks are re-derived from `focusedAt`, and windows
+nothing was ever seen focused on are all ties that would otherwise keep the scrambled order. And the run
+holds back the app's ORDER-INS too, since each raise carries an 815 in the same millisecond that would
+otherwise re-front exactly what the 808 was held for.
+
+- **testAnAppRaisingAllItsWindowsLeavesTheMruAlone** — the capture, replayed: the app still says C1 has keys,
+  so the whole run resolves to zero net bumps and the interleaved order is exactly as the user left it.
+- **testTheBurstResolvedToAMemberFrontsThatOneAlone** — the same run resolved to a different member: that one
+  window fronts, nothing else of the app's moves, and it is stamped at the run's FIRST 808 so anything the OS
+  focused while the read was in flight still outranks it.
+- **testATwoWindowBurstResolvedToTheFrontRollsTheSpeculativeBumpBack** /
+  **testATwoWindowBurstResolvedToTheFirstMemberKeepsItsBump** — both verdicts on the smallest run there is.
+  Both have to be reachable, or the read is decoration.
+- **testALoneFocusEventBumpsWithoutAskingTheApp** — the fast path is untouched: a lone 808 bumps on the spot
+  and spends no AX read. That is the overwhelming majority of this stream.
+- **testTwoFocusesABeatApartAreNotABurst** — 300ms apart is two focuses, past the gap and past the fastest
+  human action ever captured.
+- **testTheSameWindowFocusedTwiceIsNotABurst** — one window reported twice is not a run of different windows;
+  `Window.focus()` fires several calls for one wid. Mirrors the 815 path's own rule.
+- **testAltTabsOwnFocusInsideABurstStillBumps** — the objection that makes this safe to ship. Focusing a
+  window of the already-frontmost app raises no app, so `altTabIntentToRecord` deliberately keeps nothing
+  (#5596) and the switch rides on one 808; held back with the run it would be lost for good, since
+  re-focusing an already-focused window emits nothing at all. Hence a separate same-app record, read ONLY
+  here. Resolved with a FAILED read on purpose: the bump must not depend on the oracle answering.
+- **testOrderInsAreHeldWhileAFocusBurstIsInFlight** — the 815 half, and it is load-bearing: without it the
+  suppressed 808s are simply re-fronted by their own order-ins 29ms later, which `reshowBurstGap` cannot see.
+- **testAnUntrackedFocusInsideABurstIsNotPromoted** / **testAnUntrackedFocusOutsideABurstIsStillPromoted** —
+  an untracked member is the window we know least about, so it does not front itself on arrival while the
+  run's tracked windows are held; if the app names it, the promotion is armed then. Outside a run the
+  promotion stays exactly as it was (#5785).
+- **testAStaleReadNamingAnOutsiderChangesNothing** — `kAXFocusedWindow` is answered at all times, whether or
+  not anything just happened, so an answer naming a window the run never touched decides nothing.
+- **testAnUnresolvedBurstLeavesTheSpeculativeBumpStanding** — a read that failed outright leaves today's
+  behaviour in place rather than guessing in the oracle's place.
+- **testALateAnswerDoesNotCloseTheNextRun** — the read is asynchronous and `AXCallScheduler` holds a second
+  call for the same key until the first returns, so run N's answer can arrive after run N+1 opened. It must
+  not close it: the held focus events would be dropped with nothing behind them to correct the order. Hence
+  `runStartedAt`, carried out on the effect and back on the input, naming the run being answered.
+- **testAnOrderInOnlyRaiseInsideABurstIsStillResolvable** — a window can join a run through the order-in path
+  alone, since the native Cmd+` raise emits an 815 and no 808. Holding its bump and then rejecting the
+  verdict that names it as "no member of the run" would swallow that raise twice over (#5875, #5439), so a
+  held order-in is recorded as a MEMBER and not merely as a heartbeat.
+- **testAnUntrackedOrderInInsideABurstIsNotPromoted** / **testAnUntrackedMoveIsNotMistakenForABurstMember** —
+  the hold covers the untracked order-in too, or an undiscovered window of the bursting app fronts itself on
+  arrival and keeps the scramble alive on its own. Gated on the event really being an order-in: a move/resize
+  reaches the same code carrying no `now`, and a zero timestamp reads as "inside every run that ever started".
+- **testTheRollbackSurvivesAGenuineFocusLandingMidRun** — the undo re-seeds the whole pre-run tiebreak rather
+  than restoring the window's own position. An index puts it back a slot too far forward once a genuine focus
+  mid-run has shifted everything behind it, and an anchor row drags it along when the anchor is what the user
+  focused. `recomputeFocusRanks` still sorts by `focusedAt` first, so the window the user really clicked keeps
+  the front it earned.
+- **testAnActivationStormIsStillTheActivationResolversAlone** — inside a live activation none of this
+  applies: that storm is the OS's own and `ActivationFocusResolver` rules it alone (first 808 = the focus,
+  raise tail swallowed). Double-judging it is how #5596 was reopened twice.

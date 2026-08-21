@@ -431,4 +431,376 @@ final class WindowEventReducerFocusTests: XCTestCase {
         XCTAssertEqual(order(s, Self.reaperMainWid), 0)
         XCTAssertEqual(s.window(Self.reaperMainWid)?.isMinimized, false)
     }
+
+    // MARK: - E. An app raising ALL its windows while already frontmost (#5974)
+
+    /// The captured Chrome wids and their MRU slots, so the replay below reads as the capture does.
+    private static let c1: CGWindowID = 51228   // held the front, before and after
+    private static let c2: CGWindowID = 51241
+    private static let c3: CGWindowID = 51249   // the burst's first member, from MRU 4
+    private static let finder2Wid: CGWindowID = 665
+
+    /// `BEFORE  C1(0)  other(1)  C2(2)  other(3)  C3(4)` — the interleaved MRU the capture starts from, with
+    /// the bursting app owning slots 0, 2 and 4. Reaper stands in for Chrome, Finder for the two apps
+    /// between its windows.
+    private func interleavedState() -> TrackedWindowState {
+        state([
+            window(Self.c1, Self.reaperPid, "C1", order: 0),
+            window(Self.finderWid, Self.finderPid, "System Settings", order: 1),
+            window(Self.c2, Self.reaperPid, "C2", order: 2),
+            window(Self.finder2Wid, Self.finderPid, "Claude", order: 3),
+            window(Self.c3, Self.reaperPid, "C3", order: 4),
+        ], frontmost: Self.reaperPid)
+    }
+
+    /// The measured burst, verbatim (18:26:01, macOS 26.6): one 808 plus one 815 per window, 29ms between
+    /// windows, no `didActivateApplication` anywhere. Every 808 fell through to "bump iff the app is active"
+    /// and the app's whole set walked to the top, pushing every other app under it.
+    private func raiseAllSteps(_ s: inout TrackedWindowState) {
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.c3, now: 100.417))
+        _ = WindowEventReducer.reduce(&s, .windowOrderedIn(wid: Self.c3, now: 100.417, inSpaceTransition: false))
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.c2, now: 100.446))
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.c1, now: 100.446))
+        _ = WindowEventReducer.reduce(&s, .windowOrderedIn(wid: Self.c1, now: 100.446, inSpaceTransition: false))
+    }
+
+    /// The report. The app itself still says C1 has keys — nobody moved — so the whole run resolves to zero
+    /// net bumps and the interleaved order the user built is exactly as they left it. No bump-based rule can
+    /// reach this verdict; it comes from asking the app, which is the point of the burst.
+    func testAnAppRaisingAllItsWindowsLeavesTheMruAlone() {
+        var s = interleavedState()
+        raiseAllSteps(&s)
+        _ = WindowEventReducer.reduce(&s, .focusBurstResolved(pid: Self.reaperPid, runStartedAt: 100.417, focusedWid: Self.c1))
+        XCTAssertEqual(order(s, Self.c1), 0, "the window that had keys all along lost the front")
+        XCTAssertEqual(order(s, Self.finderWid), 1, "another app was pushed under the raised set")
+        XCTAssertEqual(order(s, Self.c2), 2)
+        XCTAssertEqual(order(s, Self.finder2Wid), 3, "another app was pushed under the raised set")
+        XCTAssertEqual(order(s, Self.c3), 4, "the burst's first member kept a front it never earned")
+    }
+
+    /// The same run, resolved to a DIFFERENT member: that one window fronts and nothing else of the app's
+    /// moves. Stamped at the run's FIRST 808, not at the moment the read landed, so anything the OS focused
+    /// while the read was in flight still outranks it (`noteFocus` refuses older news).
+    func testTheBurstResolvedToAMemberFrontsThatOneAlone() {
+        var s = interleavedState()
+        raiseAllSteps(&s)
+        _ = WindowEventReducer.reduce(&s, .focusBurstResolved(pid: Self.reaperPid, runStartedAt: 100.417, focusedWid: Self.c2))
+        XCTAssertEqual(order(s, Self.c2), 0)
+        XCTAssertEqual(order(s, Self.c1), 1)
+        XCTAssertEqual(order(s, Self.finderWid), 2)
+        XCTAssertEqual(order(s, Self.finder2Wid), 3)
+        XCTAssertEqual(order(s, Self.c3), 4, "the speculative bump of the first member was not rolled back")
+        XCTAssertEqual(s.window(Self.c2)?.focusedAt, 100.417, "the verdict was stamped at the run's first 808, not at the moment the read landed")
+    }
+
+    /// A two-window run resolving to the window that already held the front: the first member's speculative
+    /// bump — made before a second 808 could reveal the run — is undone.
+    func testATwoWindowBurstResolvedToTheFrontRollsTheSpeculativeBumpBack() {
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 0),
+            window(Self.finderWid, Self.finderPid, "Liebesleid", order: 1),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 2),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperDialogWid, now: 100))
+        XCTAssertEqual(order(s, Self.reaperDialogWid), 0, "a lone 808 must still bump synchronously")
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100.03))
+        _ = WindowEventReducer.reduce(&s, .focusBurstResolved(pid: Self.reaperPid, runStartedAt: 100, focusedWid: Self.reaperMainWid))
+        XCTAssertEqual(order(s, Self.reaperMainWid), 0)
+        XCTAssertEqual(order(s, Self.finderWid), 1)
+        XCTAssertEqual(order(s, Self.reaperDialogWid), 2)
+    }
+
+    /// ...and the other verdict on the same run: the app confirms the first member really did take keys, so
+    /// its bump stands untouched. Both answers have to be reachable, or the read is decoration.
+    func testATwoWindowBurstResolvedToTheFirstMemberKeepsItsBump() {
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 0),
+            window(Self.finderWid, Self.finderPid, "Liebesleid", order: 1),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 2),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperDialogWid, now: 100))
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100.03))
+        _ = WindowEventReducer.reduce(&s, .focusBurstResolved(pid: Self.reaperPid, runStartedAt: 100, focusedWid: Self.reaperDialogWid))
+        XCTAssertEqual(order(s, Self.reaperDialogWid), 0)
+        XCTAssertEqual(order(s, Self.reaperMainWid), 1)
+    }
+
+    /// A lone 808 keeps the synchronous fast path it has always had: it bumps on the spot and asks the app
+    /// nothing. That is the overwhelming majority of this stream, and it must cost no latency and no AX call.
+    func testALoneFocusEventBumpsWithoutAskingTheApp() {
+        var s = state([
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 0),
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 1),
+        ], frontmost: Self.reaperPid)
+        let effects = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100))
+        XCTAssertTrue(effects.contains(.applyFocus(Self.reaperMainWid)))
+        XCTAssertFalse(effects.contains(.resolveFocusAfterBurst(pid: Self.reaperPid, runStartedAt: 100)),
+            "a lone 808 must not spend an AX read")
+        XCTAssertEqual(order(s, Self.reaperMainWid), 0)
+    }
+
+    /// The same window focused twice in an instant is one window reported twice, not a run of different
+    /// windows — `Window.focus()` fires several calls for one wid. Mirrors the 815 path's own rule.
+    func testTheSameWindowFocusedTwiceIsNotABurst() {
+        var s = state([
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 0),
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 1),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100))
+        let effects = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100.001))
+        XCTAssertTrue(effects.contains(.applyFocus(Self.reaperMainWid)))
+        XCTAssertEqual(order(s, Self.reaperMainWid), 0)
+    }
+
+    /// **AltTab's own switch, landing inside somebody else's storm.** Focusing a window of the app that is
+    /// already frontmost raises no app, so no activation follows and `altTabIntentToRecord` deliberately
+    /// keeps nothing (#5596) — the switch rides on this single 808. Held back with the rest of the run it
+    /// would be lost for good, since re-focusing an already-focused window emits nothing at all. Resolved
+    /// with a FAILED read on purpose: the bump must not depend on the oracle answering.
+    func testAltTabsOwnFocusInsideABurstStillBumps() {
+        let reaperThirdWid: CGWindowID = 4601
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 0),
+            window(Self.finderWid, Self.finderPid, "Liebesleid", order: 1),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 2),
+            window(reaperThirdWid, Self.reaperPid, "Untitled", order: 3),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: reaperThirdWid, now: 100))
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100.03))
+        _ = WindowEventReducer.reduce(&s, .altTabFocusedWindowInFrontmostApp(
+            wid: Self.reaperDialogWid, pid: Self.reaperPid, now: 100.05))
+        let effects = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperDialogWid, now: 100.06))
+        XCTAssertTrue(effects.contains(.applyFocus(Self.reaperDialogWid)),
+            "the user's own switch was swallowed as a burst member")
+        _ = WindowEventReducer.reduce(&s, .focusBurstResolved(pid: Self.reaperPid, runStartedAt: 100, focusedWid: nil))
+        XCTAssertEqual(order(s, Self.reaperDialogWid), 0)
+    }
+
+    /// `kAXFocusedWindow` is answered at all times, whether or not anything just happened to the app, so a
+    /// read naming a window the run never touched is stale news and decides nothing.
+    func testAStaleReadNamingAnOutsiderChangesNothing() {
+        var s = interleavedState()
+        raiseAllSteps(&s)
+        _ = WindowEventReducer.reduce(&s, .focusBurstResolved(pid: Self.reaperPid, runStartedAt: 100.417, focusedWid: Self.finderWid))
+        XCTAssertEqual(order(s, Self.c3), 0, "a stale read moved the MRU")
+        XCTAssertEqual(order(s, Self.finderWid), 2, "a stale read fronted a window of another app")
+    }
+
+    /// A read that failed outright (an app that is gone, busy, or hiding its AX tree) leaves the run's
+    /// speculative bump standing — today's behaviour — rather than guessing in the oracle's place.
+    func testAnUnresolvedBurstLeavesTheSpeculativeBumpStanding() {
+        var s = interleavedState()
+        raiseAllSteps(&s)
+        _ = WindowEventReducer.reduce(&s, .focusBurstResolved(pid: Self.reaperPid, runStartedAt: 100.417, focusedWid: nil))
+        XCTAssertEqual(order(s, Self.c3), 0)
+    }
+
+    /// The ORDER-INS are held with the 808s: the capture pairs each raise with an 815 in the same
+    /// millisecond, and the 815 path's own `reshowBurstGap` (5ms, sized for a WindowServer re-show at
+    /// ~0.12ms between members) cannot see an app raising its own windows 29ms apart. Without this the
+    /// suppressed 808s would simply be re-fronted by their own order-ins.
+    func testOrderInsAreHeldWhileAFocusBurstIsInFlight() {
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 0),
+            window(Self.finderWid, Self.finderPid, "Liebesleid", order: 1),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 2),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperDialogWid, now: 100))
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100.03))
+        let effects = WindowEventReducer.reduce(&s,
+            .windowOrderedIn(wid: Self.reaperMainWid, now: 100.04, inSpaceTransition: false))
+        XCTAssertFalse(effects.contains(.applyFocus(Self.reaperMainWid)),
+            "an order-in re-fronted a window whose own 808 was held")
+        XCTAssertTrue(effects.contains(.resolveFocusAfterBurst(pid: Self.reaperPid, runStartedAt: 100)),
+            "the order-in must re-arm the read, not let it fire mid-run")
+        XCTAssertEqual(order(s, Self.reaperMainWid), 1)
+    }
+
+    /// An UNTRACKED member is the one window we know least about, so promoting it on arrival while the run's
+    /// tracked windows are all held back would hand it MRU 0 for no reason. It joins the run instead; if the
+    /// app names it, `focusBurstResolved` arms the promotion then.
+    func testAnUntrackedFocusInsideABurstIsNotPromoted() {
+        let untrackedWid: CGWindowID = 9999
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 0),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 1),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperDialogWid, now: 100))
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100.03))
+        let effects = WindowEventReducer.reduce(&s, .windowFocused(wid: untrackedWid, now: 100.05))
+        XCTAssertTrue(effects.contains(.discoverWindow(wid: untrackedWid, throttled: false)))
+        XCTAssertNil(s.pendingFocusPromotion[untrackedWid],
+            "an untracked burst member was armed to front itself on discovery")
+        _ = WindowEventReducer.reduce(&s, .focusBurstResolved(pid: Self.reaperPid, runStartedAt: 100, focusedWid: untrackedWid))
+        XCTAssertEqual(s.pendingFocusPromotion[untrackedWid],
+            .circumstantial(at: 100, frontmostPid: Self.reaperPid),
+            "the app named it, so the withheld promotion must be armed now — time-placed at the run")
+    }
+
+    /// An untracked 808 with NO run in flight keeps its promotion: a freshly-focused window whose 808 outran
+    /// its async discovery would otherwise land at the back of the MRU (#5785).
+    func testAnUntrackedFocusOutsideABurstIsStillPromoted() {
+        let untrackedWid: CGWindowID = 9999
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 0),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: untrackedWid, now: 100))
+        XCTAssertEqual(s.pendingFocusPromotion[untrackedWid], .asserted)
+    }
+
+    /// Two 808s for the same app a beat apart are two separate focuses, not a run: 300ms is past
+    /// `focusBurstGap` and past the fastest human action ever captured (219ms, #5785).
+    func testTwoFocusesABeatApartAreNotABurst() {
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 0),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 1),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperDialogWid, now: 100))
+        let effects = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100.3))
+        XCTAssertTrue(effects.contains(.applyFocus(Self.reaperMainWid)))
+        XCTAssertEqual(order(s, Self.reaperMainWid), 0)
+    }
+
+    /// **A LATE answer must not close a later run.** The read is asynchronous, and `AXCallScheduler` holds a
+    /// second call for the same key until the first returns, so run 1's answer can arrive after run 2 opened
+    /// — routine for a busy app, and guaranteed once the scheduler backs off. Closing run 2 there would drop
+    /// the focus events it is holding, with nothing behind them to correct the order (#5596 / #5875).
+    func testALateAnswerDoesNotCloseTheNextRun() {
+        let reaperThirdWid: CGWindowID = 4601
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 0),
+            window(Self.finderWid, Self.finderPid, "Liebesleid", order: 1),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 2),
+            window(reaperThirdWid, Self.reaperPid, "Untitled", order: 3),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperDialogWid, now: 100))
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: reaperThirdWid, now: 100.03))
+        // run 2 opens well past the gap, so run 1's read is already in flight
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100.5))
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperDialogWid, now: 100.53))
+        // run 1's answer, landing 430ms late
+        _ = WindowEventReducer.reduce(&s, .focusBurstResolved(pid: Self.reaperPid, runStartedAt: 100,
+            focusedWid: reaperThirdWid))
+        // ...and now run 2's own answer, which must still find its run
+        _ = WindowEventReducer.reduce(&s, .focusBurstResolved(pid: Self.reaperPid, runStartedAt: 100.5,
+            focusedWid: Self.reaperDialogWid))
+        XCTAssertEqual(order(s, Self.reaperDialogWid), 0,
+            "run 2's verdict found no record: the late answer for run 1 had already closed it")
+    }
+
+    /// A window can join a run through the ORDER-IN path alone — the native Cmd+` raise emits an 815 and no
+    /// 808 at all. Holding its bump and then rejecting the verdict that names it as "no member of the run"
+    /// would swallow the raise twice over, and re-raising an already-raised window emits nothing to fix it.
+    func testAnOrderInOnlyRaiseInsideABurstIsStillResolvable() {
+        let reaperThirdWid: CGWindowID = 4601
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 0),
+            window(Self.finderWid, Self.finderPid, "Liebesleid", order: 1),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 2),
+            window(reaperThirdWid, Self.reaperPid, "Untitled", order: 3),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperDialogWid, now: 100))
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100.03))
+        // the user's Cmd+` lands inside the run: an order-in, for a window with no 808 of its own
+        _ = WindowEventReducer.reduce(&s,
+            .windowOrderedIn(wid: reaperThirdWid, now: 100.05, inSpaceTransition: false))
+        _ = WindowEventReducer.reduce(&s, .focusBurstResolved(pid: Self.reaperPid, runStartedAt: 100,
+            focusedWid: reaperThirdWid))
+        XCTAssertEqual(order(s, reaperThirdWid), 0,
+            "the verdict naming the raised window was rejected as a stale read")
+    }
+
+    /// The hold covers the untracked ORDER-IN too, not just the untracked 808. A circumstantial promotion
+    /// fronts the window the moment discovery lands, which is the one outcome the hold exists to prevent —
+    /// so an undiscovered window of the bursting app would keep the #5974 scramble alive on its own.
+    func testAnUntrackedOrderInInsideABurstIsNotPromoted() {
+        let untrackedWid: CGWindowID = 9999
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 0),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 1),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperDialogWid, now: 100))
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100.03))
+        _ = WindowEventReducer.reduce(&s,
+            .windowOrderedIn(wid: untrackedWid, now: 100.05, inSpaceTransition: false))
+        XCTAssertNil(s.pendingFocusPromotion[untrackedWid],
+            "an untracked window ordered in by the run was armed to front itself on discovery")
+    }
+
+    /// A move/resize reaches the untracked tail carrying no `now` at all, so the run test must not be applied
+    /// to it — a zero timestamp reads as "inside every run that ever started".
+    func testAnUntrackedMoveIsNotMistakenForABurstMember() {
+        let untrackedWid: CGWindowID = 9999
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 0),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 1),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperDialogWid, now: 100))
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100.03))
+        _ = WindowEventReducer.reduce(&s,
+            .windowMovedOrResized(wid: untrackedWid, inSpaceTransition: false))
+        XCTAssertNotNil(s.pendingFocusPromotion[untrackedWid],
+            "a move was read as a burst member and lost its promotion")
+    }
+
+    /// The rollback restores the window BEHIND the one it sat behind, not an absolute rank, because ranks
+    /// shift under a run: a genuine focus landing mid-run moves everything behind it down one, and a saved
+    /// position of 4 then puts the window back a slot too far forward.
+    func testTheRollbackSurvivesAGenuineFocusLandingMidRun() {
+        var s = interleavedState()
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.c3, now: 100.417))
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.c2, now: 100.446))
+        // the user clicks the other app mid-run, on the window that sat BEHIND c3
+        _ = WindowEventReducer.reduce(&s, .appActivated(pid: Self.finderPid, now: 100.5, altTabTargetWid: nil))
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.finder2Wid, now: 100.51))
+        _ = WindowEventReducer.reduce(&s, .focusBurstResolved(pid: Self.reaperPid, runStartedAt: 100.417,
+            focusedWid: Self.c1))
+        XCTAssertEqual(order(s, Self.finder2Wid), 0, "the window the user actually clicked lost the front")
+        XCTAssertEqual(order(s, Self.c1), 1)
+        XCTAssertEqual(order(s, Self.finderWid), 2)
+        XCTAssertEqual(order(s, Self.c2), 3)
+        XCTAssertEqual(order(s, Self.c3), 4, "the rolled-back window came back a slot too far forward")
+    }
+
+    /// **The first member's own ORDER-IN re-stamps it, microseconds after its 808.** Every genuine focus
+    /// has that pair, and the two arrival times differ in the microseconds — so a rollback guard demanding
+    /// `focusedAt` still equal the instant the run STARTED never matches in the field, and the speculative
+    /// bump stands whatever the app answers. Live capture 17:10:15.629 (QA A-10), where both events print
+    /// the same millisecond and the rollback silently did not fire. The unit tests missed it by passing the
+    /// same literal `now` to both.
+    func testTheFirstMembersOwnOrderInDoesNotDefeatTheRollback() {
+        var s = state([
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 0),
+            window(Self.finderWid, Self.finderPid, "Liebesleid", order: 1),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 2),
+        ], frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperDialogWid, now: 100))
+        _ = WindowEventReducer.reduce(&s,
+            .windowOrderedIn(wid: Self.reaperDialogWid, now: 100.000_2, inSpaceTransition: false))
+        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100.03))
+        _ = WindowEventReducer.reduce(&s, .focusBurstResolved(pid: Self.reaperPid, runStartedAt: 100,
+            focusedWid: Self.reaperMainWid))
+        XCTAssertEqual(order(s, Self.reaperMainWid), 0,
+            "the run's speculative bump was not rolled back: its own order-in had re-stamped focusedAt")
+        XCTAssertEqual(order(s, Self.finderWid), 1)
+        XCTAssertEqual(order(s, Self.reaperDialogWid), 2)
+    }
+
+    /// Inside a live activation nothing here applies: that storm is the OS's own, `ActivationFocusResolver`
+    /// rules it alone (first 808 = the focus, the raise tail swallowed), and the run must not double-judge it.
+    func testAnActivationStormIsStillTheActivationResolversAlone() {
+        var s = state([
+            window(Self.finderWid, Self.finderPid, "Liebesleid", order: 0),
+            window(Self.reaperMainWid, Self.reaperPid, "REAPER", order: 1),
+            window(Self.reaperDialogWid, Self.reaperPid, "Insert Multiple Media Items", order: 2),
+        ], frontmost: Self.finderPid)
+        _ = WindowEventReducer.reduce(&s, .appActivated(pid: Self.reaperPid, now: 100, altTabTargetWid: nil))
+        let first = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperMainWid, now: 100.01))
+        XCTAssertTrue(first.contains(.applyFocus(Self.reaperMainWid)), "the activation's first 808 is the focus")
+        XCTAssertFalse(first.contains(.resolveFocusAfterBurst(pid: Self.reaperPid, runStartedAt: 100)))
+        let tail = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.reaperDialogWid, now: 100.04))
+        XCTAssertFalse(tail.contains(.applyFocus(Self.reaperDialogWid)), "the raise tail must stay swallowed")
+        XCTAssertFalse(tail.contains(.resolveFocusAfterBurst(pid: Self.reaperPid, runStartedAt: 100)))
+        XCTAssertEqual(order(s, Self.reaperMainWid), 0)
+    }
 }

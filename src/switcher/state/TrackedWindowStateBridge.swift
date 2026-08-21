@@ -56,7 +56,7 @@ class TrackedWindowStateBridge {
             return true
         case .discoveryLanded, .titleAndTabsRead, .windowServerStateRead, .spacesSynced,
              .axFocusedWindowRead, .livenessConfirmedDead, .cgsWindowListsRead, .zOrderRead,
-             .holdReleaseCheck, .dragOutCheck:
+             .holdReleaseCheck, .dragOutCheck, .altTabFocusedWindowInFrontmostApp, .focusBurstResolved:
             return false
         }
     }
@@ -247,6 +247,8 @@ class TrackedWindowStateBridge {
                 }
             case .bumpFocusViaAxBackstop(let pid):
                 WindowServerEvents.bumpFocusOnActivation(pid)
+            case .resolveFocusAfterBurst(let pid, let runStartedAt):
+                WindowServerEvents.resolveFocusAfterBurst(pid, runStartedAt)
             case .checkShortcutsForFocusedWindow:
                 if let frontmostPid = Applications.frontmostPid,
                    let frontmostApp = Applications.findOrCreate(frontmostPid, false),

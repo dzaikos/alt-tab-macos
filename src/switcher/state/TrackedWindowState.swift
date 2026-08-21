@@ -258,6 +258,13 @@ struct TrackedWindowState: Equatable {
     /// Deliberately NOT carried between dispatches: every dispatch stamps its own.
     var now: TimeInterval = 0
 
+    /// The window AltTab focused inside the app that was already frontmost, with the instant it did.
+    struct AltTabSameAppFocus: Equatable {
+        var wid: CGWindowID
+        var pid: pid_t
+        var at: TimeInterval
+    }
+
     /// One half of a Space HANDOVER, waiting for the other. See `TrackedWindow.replacedByWid`.
     struct SpaceHandoverHalf: Equatable {
         var wid: CGWindowID
@@ -302,6 +309,14 @@ struct TrackedWindowState: Equatable {
         var offScreen = Set<CGWindowID>()
         /// per-app activation state for the 808 storm
         var pendingActivationRaises = [pid_t: ActivationEntry]()
+        /// Per app, the 808 run that no activation explains — an app raising its own windows while it is
+        /// ALREADY frontmost (#5974). See `WindowEventReducer.focusBurstGap`.
+        var focusBursts = [pid_t: WindowEventReducer.FocusBurst]()
+        /// AltTab's own focus into the app that is already frontmost. No activation follows it, so
+        /// `ActivationFocusResolver.altTabIntentToRecord` deliberately keeps nothing (a leftover intent
+        /// reopens #5596) and the switch rides on a single 808 — which a burst in flight would swallow, with
+        /// nothing behind it to correct the order. Read ONLY by the burst path, never by the activation one.
+        var altTabSameAppFocus: AltTabSameAppFocus?
         /// Until when a system re-show is considered in flight, so the OS putting the desktop back does not
         /// read as the user raising each window (`WindowEventReducer.systemReshowMute`).
         var systemReshowMuteUntil: TimeInterval = 0
@@ -747,6 +762,15 @@ enum ReducerInput: Equatable {
     /// (`WindowServerEvents.bumpFocusOnActivation`), else a window discovered while its app was already
     /// frontmost (`Window.checkIfFocused`). The two differ only in their gate.
     case axFocusedWindowRead(wid: CGWindowID, viaActivationBackstop: Bool)
+    /// AltTab focused a window of the app that is ALREADY frontmost, so no activation is coming to carry the
+    /// target (`WindowServerEvents.noteAltTabInitiatedFocus`). Recorded only so the focus burst can tell the
+    /// user's own switch from an app raising its windows; see `TrackedWindowState.Carried.altTabSameAppFocus`.
+    case altTabFocusedWindowInFrontmostApp(wid: CGWindowID, pid: pid_t, now: TimeInterval)
+    /// The app's own `kAXFocusedWindow`, read once a focus burst went quiet (`.resolveFocusAfterBurst`).
+    /// `focusedWid` is nil when the read failed; the burst is closed either way. `runStartedAt` NAMES the run
+    /// being answered (`FocusBurst.firstAt`) — see the effect for why an answer without it lands on the
+    /// wrong run.
+    case focusBurstResolved(pid: pid_t, runStartedAt: TimeInterval, focusedWid: CGWindowID?)
     /// The AX probes after an order-out agreed the window is gone: dead cached element AND the app no longer
     /// lists the wid (`Applications.removeIfClosedAfterOrderOut`).
     case livenessConfirmedDead(wid: CGWindowID)
@@ -817,6 +841,17 @@ enum ReducerEffect: Equatable {
     /// an activation emitted no 808 — read the front app's focused window from AX and bump it
     /// (`WindowServerEvents.bumpFocusOnActivation`, the weak-signal backstop)
     case bumpFocusViaAxBackstop(pid: pid_t)
+    /// A same-app 808 run with no activation behind it left the MRU unjudged: once the run goes quiet, ask
+    /// the app itself which of its windows has keys (`kAXFocusedWindow`) and feed the answer back as
+    /// `.focusBurstResolved`. Debounced per pid by the shell — every new member of the run re-arms it.
+    ///
+    /// `runStartedAt` is the run's identity (`FocusBurst.firstAt`), carried out and back so a LATE answer
+    /// cannot be applied to a later run. The read is asynchronous and `AXCallScheduler` holds a second call
+    /// for the same key until the first finishes, so a slow app (an unresponsive Electron one, or any app
+    /// once the scheduler backs off) really can have run N's answer arrive after run N+1 has opened. Without
+    /// this it would close that run, and run N+1's own answer would then find nothing to apply — leaving its
+    /// held focus events dropped for good, which is the #5596 / #5785 / #5875 symptom exactly.
+    case resolveFocusAfterBurst(pid: pid_t, runStartedAt: TimeInterval)
     /// re-check shortcut disabling for the frontmost app's focused window (after a Space change settles)
     case checkShortcutsForFocusedWindow
     /// One fact about what this input decided. The shell JOINS every one an input produced into a single

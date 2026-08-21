@@ -53,15 +53,29 @@ class WindowServerEvents {
     /// didActivate of that app: the target is KNOWN, so the activation bumps it directly instead of divining
     /// it from a racy 808 / AX read (see `ActivationFocusResolver.onActivation`). Time-bounded and one-shot.
     private static var altTabInitiatedFocus: ActivationFocusResolver.AltTabFocusIntent?
+    /// Per pid, the pending focus-burst read (`resolveFocusAfterBurst`), cancelled and re-armed by each new
+    /// member of the run. Main-thread only, like every other timer here.
+    private static var focusBurstReads = [pid_t: DispatchWorkItem]()
+    /// How long a focus burst must stay silent before its resolving read fires. It is the reducer's
+    /// `WindowEventReducer.focusBurstGap` — the same silence that ends the run — so the read cannot land
+    /// while the reducer would still count an arriving 808 as part of it.
+    private static var focusBurstQuietPeriod: TimeInterval { WindowEventReducer.focusBurstGap }
 
     /// Whether this focus is worth recording is `ActivationFocusResolver.altTabIntentToRecord`'s decision (it
     /// carries the rationale); the tap only supplies the ambient facts and holds the slot. A focus that isn't
     /// worth recording leaves any pending intent alone — that one's activation may still be on its way.
     static func noteAltTabInitiatedFocus(_ wid: CGWindowID, _ pid: pid_t) {
+        let now = ProcessInfo.processInfo.systemUptime
         if let intent = ActivationFocusResolver.altTabIntentToRecord(
-            wid: wid, pid: pid, frontmostPid: Applications.frontmostPid,
-            at: ProcessInfo.processInfo.systemUptime) {
+            wid: wid, pid: pid, frontmostPid: Applications.frontmostPid, at: now) {
             altTabInitiatedFocus = intent
+        } else {
+            // The case that resolver refuses on purpose: the app is ALREADY frontmost, so no activation is
+            // coming to consume an intent and a leftover one would mis-target the next real Cmd+Tab (#5596).
+            // The switch still needs to be recognisable though — it rides on a single 808, and a same-app
+            // focus burst would swallow it with nothing behind it to correct the order — so the reducer keeps
+            // its own record for that one reader (`TrackedWindowState.Carried.altTabSameAppFocus`).
+            TrackedWindowStateBridge.dispatch(.altTabFocusedWindowInFrontmostApp(wid: wid, pid: pid, now: now))
         }
     }
 
@@ -298,6 +312,50 @@ class WindowServerEvents {
                 TrackedWindowStateBridge.dispatch(.axFocusedWindowRead(wid: wid, viaActivationBackstop: true))
             }
         }
+    }
+
+    /// **The focus-burst read.** An app raising all its windows while it is already frontmost emits one 808
+    /// per window and no activation, and nothing in the event stream or the WindowServer says which of them
+    /// actually took keys (`WindowEventReducer.focusBurstGap`). The reducer holds the MRU still and asks here;
+    /// the only oracle is the app's own `kAXFocusedWindow`, so that is what this reads.
+    ///
+    /// Debounced per pid — every member of the run re-arms it — so the read happens ONCE, after the app has
+    /// settled, rather than between an 808 and the 815 behind it. `focusBurstQuietPeriod` matches the
+    /// reducer's gap by construction: the same silence that closes the run is the silence that triggers this.
+    /// The AX call goes through `AXCallScheduler` for its pid-aware threading (our own windows must be read
+    /// on main) and its per-key dedup, a second net under the debounce.
+    ///
+    /// **Both reads use `try?`, so this block never throws and the scheduler's retry/backoff never engages —
+    /// deliberately.** A retry would re-ask a question that has gone stale: by the time a beach-balling app
+    /// answers the second attempt, the run it belonged to is long closed, and `runStartedAt` would discard
+    /// the answer anyway. Swallowing instead guarantees the thing that matters more — that EVERY path
+    /// reports back, `nil` included, so the reducer always closes the run. A run left open holds the MRU
+    /// still and mutes the app's next genuine raise.
+    ///
+    /// `runStartedAt` names the run being answered and is carried straight through to the reducer, which
+    /// drops an answer that does not match the run it currently holds. It has to: this read is asynchronous
+    /// and the scheduler holds a second call for the same key until the first returns, so a slow app really
+    /// can have run N's answer arrive after run N+1 opened.
+    static func resolveFocusAfterBurst(_ pid: pid_t, _ runStartedAt: TimeInterval) {
+        focusBurstReads[pid]?.cancel()
+        let work = DispatchWorkItem {
+            focusBurstReads.removeValue(forKey: pid)
+            guard let app = Applications.findOrCreate(pid, false), let appAx = app.axUiElement else {
+                TrackedWindowStateBridge.dispatch(
+                    .focusBurstResolved(pid: pid, runStartedAt: runStartedAt, focusedWid: nil))
+                return
+            }
+            AXCallScheduler.shared.schedule(key: "pid-\(pid)-burst-focus", pid: pid) {
+                let focused = try? appAx.attributes([kAXFocusedWindowAttribute], pid: pid).focusedWindow
+                let wid = focused.flatMap { try? $0.cgWindowId(pid: pid) }
+                DispatchQueue.main.async {
+                    TrackedWindowStateBridge.dispatch(
+                        .focusBurstResolved(pid: pid, runStartedAt: runStartedAt, focusedWid: wid))
+                }
+            }
+        }
+        focusBurstReads[pid] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + focusBurstQuietPeriod, execute: work)
     }
 
     /// 1329/1401 can fire several times during one Space transition; debounce so the topology refresh + UI
