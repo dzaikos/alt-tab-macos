@@ -30,12 +30,17 @@ func printStackTrace() {
 }
 
 // during an emergency exit, we re-enable the native command+tab, and log
+// note: _exit, not exit. exit runs atexit handlers and static destructors, which tear down
+// framework state (e.g. mutexes) while other threads are still running. AppKit's event thread
+// then crashes with 'mutex lock failed: Invalid argument'
 fileprivate func emergencyExit(_ logs: Any?...) {
     setNativeCommandTabEnabled(true)
     print(logs)
     printStackTrace()
     makeSureAllCapturesAreFinished()
-    exit(0)
+    fflush(stdout)
+    fflush(stderr)
+    _exit(0)
 }
 
 func makeSureAllCapturesAreFinished() {
