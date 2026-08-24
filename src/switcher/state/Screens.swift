@@ -17,8 +17,14 @@ extension NSScreen {
     static var preferred = NSScreen.screens.first!
     private static var uuidCache = [ObjectIdentifier: ScreenUuid]()
 
+    /// During a display reconfiguration (unplug, sleep, resolution change) `NSScreen.screens` can be
+    /// empty for a moment, and the notification that tells us to recompute arrives in that window.
+    /// There is no valid NSScreen to fall back to then (`NSScreen()` crashes on access), so we keep
+    /// the last known screen until the display list comes back.
     static func updatePreferred() {
-        preferred = detectPreferred() ?? NSScreen.screens.first!
+        if let screen = detectPreferred() ?? NSScreen.screens.first {
+            preferred = screen
+        }
     }
 
     private static func detectPreferred() -> NSScreen? {
