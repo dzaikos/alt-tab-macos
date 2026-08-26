@@ -331,7 +331,8 @@ class Windows {
     static func updateSelectedAndHoveredWindowIndex(_ newIndex: Int, _ fromMouse: Bool = false) {
         guard let session = SwitcherSession.current else { return }
         guard newIndex >= 0 && newIndex < list.count else { return }
-        guard shouldDisplay(list[newIndex]) else { return }
+        let newWindow = list[newIndex]
+        guard shouldDisplay(newWindow) else { return }
         var index: Int?
         if fromMouse { session.userPickedSelection = true }
         if fromMouse && (newIndex != session.hoveredIndex || lastWindowActivityType == .focus) {
@@ -346,11 +347,13 @@ class Windows {
         if !fromMouse {
             TilesView.thumbnailOverView.resetHoveredWindow()
         }
+        // Search can replace the best match at the same index. Its identity must still move so the
+        // Preview fetches the new filtered neighborhood instead of treating the previous match as selected.
         if (!fromMouse || Preferences.mouseHoverEnabled)
-               && (newIndex != session.selectedIndex || lastWindowActivityType == .hover) {
+               && (newIndex != session.selectedIndex || session.selectedTarget != newWindow.id || lastWindowActivityType == .hover) {
             let oldIndex = session.selectedIndex
             session.selectedIndex = newIndex
-            session.selectedTarget = list[newIndex].id
+            session.selectedTarget = newWindow.id
             TilesView.highlight(oldIndex)
             WindowThumbnails.previewSelectedIfNeeded()
             WindowThumbnails.fetchPreviewFrames()
