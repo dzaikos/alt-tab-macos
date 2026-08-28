@@ -23,6 +23,9 @@ class Application: NSObject {
     var dockLabel: String?
     var focusedWindow: Window? = nil
     var alreadyRequestedToQuit = false
+    /// The tracking pipeline's identity for this process, so a late teardown cannot hit a replacement that
+    /// reused the pid (`AxObserverRegistry.processExited`).
+    var trackingGeneration: UInt64 = 0
     var debugId: String
 
     /// Forwards every `ApplicationState` field by name — `app.pid` resolves to `state.pid`,
@@ -91,6 +94,12 @@ class Application: NSObject {
         // AXVisualSupportAgent…). A process listing is not what a bug report needs; `DebugProfile` already
         // reports the count, and `RunningApplicationsEvents` logs launches and quits.
         Logger.debug { self.debugId }
+        // Here rather than at a call site: a process reaches the model through `Applications.createActualApp`
+        // AND through the synchronous `findOrCreate` an AX/WindowServer event for an unknown pid takes, and
+        // hooking only the first left every app discovered by the second with no AX observer at all.
+        AttentionEngine.processStarted(state.pid)
+        trackingGeneration = AttentionEngine.generation(of: state.pid)
+        AxObserverRegistry.shared.processStarted(state.pid)
         ensureAxUiElement()
         kvObservers = [
             runningApplication.observe(\.activationPolicy, options: [.new]) { [weak self] _, _ in
@@ -105,6 +114,10 @@ class Application: NSObject {
 
     deinit {
         Logger.debug { self.debugId }
+        // Safety net for any path that drops an Application without going through
+        // `Applications.removeRunningApplications`. Checked against the generation this object registered,
+        // so a late deinit cannot tear down a replacement process that reused the pid.
+        AxObserverRegistry.shared.processExited(state.pid, generation: trackingGeneration)
         // `NSRunningApplication` KVO removal can throw NSInternalInconsistencyException
         // ("Failed to register for runningApplicationNotificationCallback") — an Apple bug
         // when the underlying notification XPC service has gone away (e.g. observed app
@@ -139,8 +152,13 @@ class Application: NSObject {
 
     @discardableResult
     func addWindowlessWindowIfNeeded() -> Window? {
+        // A window nothing has vouched for does not count as the app having a window: it is not drawn, so an
+        // app whose only windows are WindowServer candidates would otherwise lose its placeholder and vanish
+        // from the switcher entirely while its app was hung.
         guard runningApplication.activationPolicy == .regular && !runningApplication.isTerminated
-               && !(Windows.list.contains { $0.application.pid == self.pid && !$0.isPhantom }) else { return nil }
+               && !(Windows.list.contains {
+                   $0.application.pid == self.pid && !$0.isPhantom && $0.axStatus.isPresentable
+               }) else { return nil }
         let window = Window(self)
         Windows.appendWindow(window)
         focusedWindow = nil

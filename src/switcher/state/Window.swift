@@ -103,7 +103,10 @@ class Window {
         set { storedState[keyPath: keyPath] = newValue }
     }
 
-    init(_ axUiElement: AXUIElement, _ application: Application, _ wid: CGWindowID, _ title: String?, _ isFullscreen: Bool?, _ isMinimized: Bool?, _ position: CGPoint?, _ size: CGSize?) {
+    /// `axUiElement` is optional on purpose: a window the WindowServer lists but AX cannot answer for is
+    /// still a real window, and dropping it is how a hung app's window becomes untrackable. See
+    /// `AxSemanticStatus`.
+    init(_ axUiElement: AXUIElement?, _ application: Application, _ wid: CGWindowID, _ title: String?, _ isFullscreen: Bool?, _ isMinimized: Bool?, _ position: CGPoint?, _ size: CGSize?, _ axStatus: AxSemanticStatus = .axVerified) {
         storedState = WindowState(
             id: "wid-\(wid)", isPhantom: false, isWindowlessApp: false,
             isFullscreen: false, isMinimized: false, isTabbed: false,
@@ -111,6 +114,7 @@ class Window {
             lastFocusOrder: .zero, creationOrder: .zero, title: "")
         self.axUiElement = axUiElement
         self.application = application
+        self.axStatus = axStatus
         cgWindowId = wid
         // Default a new window to the current Space rather than fetching its Space here: that fetch is a
         // blocking CGS call and `Window.init` runs on the main thread (#5721). A brand-new window is on the
@@ -121,7 +125,8 @@ class Window {
         debugId = "\(self.application.debugId) (wid:\(cgWindowId) title:\(self.title))"
         Window.globalCreationCounter += 1
         self.creationOrder = Window.globalCreationCounter
-        application.removeWindowlessAppWindow()
+        // Only a window the switcher will actually draw replaces the app's placeholder icon.
+        if axStatus.isPresentable { application.removeWindowlessAppWindow() }
         // ensure the app's AXUIElement exists for on-demand reads + window actions (it's skipped at app init
         // for ineligible apps; having a window means the app is eligible now)
         application.ensureAxUiElement()
@@ -323,8 +328,11 @@ class Window {
         // The switcher reflects OS state, never a predicted one.
     }
 
+    /// Every one of these commands is an AX write. A window kept on WindowServer evidence alone has no
+    /// element to write to, so it fails safely with the same beep an ineligible window gets rather than
+    /// force-unwrapping nil.
     func canBeMinDeminOrFullscreened() -> Bool {
-        return !self.isWindowlessApp && !self.isTabbed
+        return !self.isWindowlessApp && !self.isTabbed && (axUiElement != nil || altTabWindow() != nil)
     }
 
     func minDemin() {
@@ -337,16 +345,16 @@ class Window {
             return
         }
         BackgroundWork.accessibilityCommandsQueue.addOperation { [weak self] in
-            guard let self else { return }
+            guard let self, let element = self.axUiElement else { return }
             if self.isFullscreen {
-                try? self.axUiElement!.setAttribute(kAXFullscreenAttribute, false)
+                try? element.setAttribute(kAXFullscreenAttribute, false)
                 // minimizing is ignored if sent immediatly; we wait for the de-fullscreen animation to be over
                 BackgroundWork.accessibilityCommandsQueue.addOperationAfter(deadline: .now() + .seconds(1)) { [weak self] in
-                    guard let self else { return }
-                    try? self.axUiElement!.setAttribute(kAXMinimizedAttribute, true)
+                    guard let self, let element = self.axUiElement else { return }
+                    try? element.setAttribute(kAXMinimizedAttribute, true)
                 }
             } else {
-                try? self.axUiElement!.setAttribute(kAXMinimizedAttribute, !self.isMinimized)
+                try? element.setAttribute(kAXMinimizedAttribute, !self.isMinimized)
             }
         }
     }
@@ -361,8 +369,8 @@ class Window {
             return
         }
         BackgroundWork.accessibilityCommandsQueue.addOperation { [weak self] in
-            guard let self else { return }
-            try? self.axUiElement!.setAttribute(kAXFullscreenAttribute, !self.isFullscreen)
+            guard let self, let element = self.axUiElement else { return }
+            try? element.setAttribute(kAXFullscreenAttribute, !self.isFullscreen)
         }
     }
 
@@ -393,12 +401,13 @@ class Window {
             // AltTab knows exactly which window it is focusing — record it so the coming app activation
             // bumps this window directly instead of divining the focus from a racy 808 / AX read (#5596).
             WindowServerEvents.noteAltTabInitiatedFocus(cgWindowId!, application.pid)
+            Windows.promoteDirected(cgWindowId!)
             let targetMaybeCrossSpace = !self.spaceIds.isEmpty && !self.spaceIds.contains(originSpaceId)
             let originFrontPid = targetMaybeCrossSpace ? NSWorkspace.shared.frontmostApplication?.processIdentifier : nil
             BackgroundWork.accessibilityCommandsQueue.addOperation { [weak self] in
                 guard let self else { return }
-                if self.isMinimized {
-                    try? self.axUiElement!.setAttribute(kAXMinimizedAttribute, false)
+                if self.isMinimized, let element = self.axUiElement {
+                    try? element.setAttribute(kAXMinimizedAttribute, false)
                 }
                 // Focusing another app's window reliably takes the steps below. The public APIs alone don't
                 // move key focus across apps (macOS 14 downgraded NSRunningApplication.activate to an advisory
@@ -419,11 +428,15 @@ class Window {
                 GetProcessForPID(self.application.pid, &psn)
                 _SLPSSetFrontProcessWithOptions(&psn, self.cgWindowId!, SLPSMode.userGenerated.rawValue)
                 makeKeyWindow(&psn, self.cgWindowId!)
-                if self.axUiElement!.raiseWindow() == .invalidUIElement, let fresh = self.refreshedAxElement() {
+                // Step 3 is the only AX-dependent step: 1 and 2 use the wid and psn directly, so a window
+                // with no element still gets fronted and made key — which is the whole point of keeping a
+                // hung app's window trackable.
+                if self.axUiElement?.raiseWindow() != .success, let fresh = self.refreshedAxElement() {
                     fresh.raiseWindow()
                     DispatchQueue.main.async { [weak self] in
                         guard let self, self.axUiElement != fresh else { return }
                         self.rebindAxElement(fresh)
+                        Windows.promoteVerified(self.cgWindowId ?? 0)
                     }
                 }
                 // step 4 (#4507): undo step 1's clobber of the origin Space. The front-switch made that Space

@@ -112,99 +112,53 @@ final class WindowEventReducerPhantomTests: XCTestCase {
         XCTAssertTrue(s.isPhantom(s.windows[0]))
     }
 
-    // MARK: - C. Focus clears a stale phantom immediately (#5849)
+    // MARK: - C. Attention clears a stale phantom immediately (#5849)
 
     /// The gap the CGS pass alone leaves: the verdict is only recomputed on a show, a beat AFTER the
     /// switcher appears. Opening Slack and tapping the shortcut straight away hit the switcher while the
-    /// stale latch still hid the window the user had just focused. Focus is proof, so it clears the latch
-    /// the moment it happens, without waiting for a pass.
-    func testFocusClearsAStalePhantomLatch() {
+    /// stale latch still hid the window the user had just focused. Attention is proof, so it clears the
+    /// latch the moment it lands, without waiting for a pass.
+    func testAttentionClearsAStalePhantomLatch() {
         var s = state([slackWindow(latchedPhantom: true, lastFocusOrder: 3)], appIsActive: true)
         XCTAssertTrue(s.isPhantom(s.windows[0]), "precondition: latched phantom")
-        _ = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.slackWid, now: 10.0))
+        _ = WindowEventReducer.reduce(&s, .attentionCommitted(wid: Self.slackWid, observed: Self.slackWid,
+            at: 10.0))
         XCTAssertFalse(s.isPhantom(s.windows[0]))
     }
 
-    /// Un-phantoming by focus must also drop the placeholder its app grew while it looked windowless —
-    /// otherwise the fast path trades the wrong-window bug for the duplicate-tile one.
-    func testFocusUnphantomingEmitsRemoveWindowlessPlaceholder() {
+    /// Un-phantoming must also drop the placeholder its app grew while it looked windowless — otherwise the
+    /// fast path trades the wrong-window bug for the duplicate-tile one.
+    func testAttentionUnphantomingEmitsRemoveWindowlessPlaceholder() {
         var s = state([slackWindow(latchedPhantom: true, lastFocusOrder: 3)], appIsActive: true)
-        let effects = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.slackWid, now: 10.0))
+        let effects = WindowEventReducer.reduce(&s, .attentionCommitted(wid: Self.slackWid,
+            observed: Self.slackWid, at: 10.0))
         XCTAssertTrue(dropsPlaceholder(effects))
     }
 
-    /// Focusing an already-real window changes nothing: no spurious placeholder removal on every focus.
-    func testFocusingARealWindowEmitsNoPlaceholderRemoval() {
+    /// An already-real window changes nothing: no spurious placeholder removal on every decision.
+    func testAttentionOnARealWindowEmitsNoPlaceholderRemoval() {
         var s = state([slackWindow(latchedPhantom: false, lastFocusOrder: 3)], appIsActive: true)
-        let effects = WindowEventReducer.reduce(&s, .windowFocused(wid: Self.slackWid, now: 10.0))
+        let effects = WindowEventReducer.reduce(&s, .attentionCommitted(wid: Self.slackWid,
+            observed: Self.slackWid, at: 10.0))
         XCTAssertFalse(dropsPlaceholder(effects))
     }
 
-    // MARK: - D. Focus that arrives as an AX READ clears it too (#5849, second report)
+    // MARK: - D. The same, for the window a reopened app comes back to (#5849, second report)
 
     /// Reopening Slack from the Dock reaches the front through the ACTIVATION, and that activation emits no
-    /// 808 for the window — the AX backstop is the only focus signal. It used to bump the MRU straight from
+    /// 808 for the window — the app's own answer is the only signal. It used to bump the MRU straight from
     /// the shell, so the latch survived: summoning the switcher 130 ms later hid the window the user was
     /// looking at while it held slot 0, and the default pick skipped past the previous window onto a third
     /// app (System Settings, in the capture).
-    func testActivationBackstopClearsAStalePhantomLatch() {
+    func testTheReopenedWindowsLatchIsCleared() {
         var s = state([slackWindow(latchedPhantom: true, lastFocusOrder: 1), otherAppWindow(order: 0)],
             appIsActive: true)
         XCTAssertTrue(s.isPhantom(s.windows[0]), "precondition: latched phantom")
-        let effects = WindowEventReducer.reduce(&s, .axFocusedWindowRead(wid: Self.slackWid,
-            viaActivationBackstop: true))
+        let effects = WindowEventReducer.reduce(&s, .attentionCommitted(wid: Self.slackWid,
+            observed: Self.slackWid, at: 10.0))
         XCTAssertFalse(s.isPhantom(s.windows[0]))
         XCTAssertEqual(s.window(Self.slackWid)?.lastFocusOrder, 0)
         XCTAssertTrue(dropsPlaceholder(effects))
-    }
-
-    /// The backstop is the weak signal: once the activation's own 808 has bumped, the read is stale (it can
-    /// name the PREVIOUS window, iTerm/#5596) and must decide nothing at all.
-    func testActivationBackstopYieldsToTheActivations808() {
-        var s = state([slackWindow(latchedPhantom: true, lastFocusOrder: 1), otherAppWindow(order: 0)],
-            appIsActive: true)
-        s.carried.pendingActivationRaises[Self.slackPid] = ActivationEntry(wids: [], until: 99, focusBumped: true)
-        let effects = WindowEventReducer.reduce(&s, .axFocusedWindowRead(wid: Self.slackWid,
-            viaActivationBackstop: true))
-        XCTAssertTrue(s.isPhantom(s.windows[0]))
-        XCTAssertEqual(s.window(Self.slackWid)?.lastFocusOrder, 1)
-        XCTAssertTrue(effects.isEmpty)
-    }
-
-    /// A backstop read landing after the user moved on to another app must not front that app's window.
-    func testActivationBackstopIgnoresANoLongerFrontmostApp() {
-        var s = state([slackWindow(latchedPhantom: true, lastFocusOrder: 1), otherAppWindow(order: 0)],
-            appIsActive: true)
-        s.frontmostPid = Self.otherPid
-        let effects = WindowEventReducer.reduce(&s, .axFocusedWindowRead(wid: Self.slackWid,
-            viaActivationBackstop: true))
-        XCTAssertEqual(s.window(Self.slackWid)?.lastFocusOrder, 1)
-        XCTAssertTrue(effects.isEmpty)
-    }
-
-    /// The other AX read: a window discovered while its app was already frontmost (cold launch, #5665). Same
-    /// clear, same placeholder drop.
-    func testCreationSeedClearsAStalePhantomLatch() {
-        var s = state([slackWindow(latchedPhantom: true, lastFocusOrder: 1), otherAppWindow(order: 0)],
-            appIsActive: true)
-        let effects = WindowEventReducer.reduce(&s, .axFocusedWindowRead(wid: Self.slackWid,
-            viaActivationBackstop: false))
-        XCTAssertFalse(s.isPhantom(s.windows[0]))
-        XCTAssertEqual(s.window(Self.slackWid)?.lastFocusOrder, 0)
-        XCTAssertTrue(dropsPlaceholder(effects))
-    }
-
-    /// `kAXFocusedWindow` answers "which window WOULD take keys", which every app has at all times — so a
-    /// read for a BACKGROUND app proves nothing and must not front its window over the one the user is on
-    /// (#5785, a re-discovered QQ window offered as "the window you were on before").
-    func testCreationSeedIgnoresABackgroundApp() {
-        var s = state([slackWindow(latchedPhantom: true, lastFocusOrder: 1), otherAppWindow(order: 0)],
-            appIsActive: false)
-        let effects = WindowEventReducer.reduce(&s, .axFocusedWindowRead(wid: Self.slackWid,
-            viaActivationBackstop: false))
-        XCTAssertTrue(s.isPhantom(s.windows[0]))
-        XCTAssertEqual(s.window(Self.slackWid)?.lastFocusOrder, 1)
-        XCTAssertTrue(effects.isEmpty)
     }
 
     // MARK: - E. An app whose last window turns phantom gets its placeholder in the SAME pass (#5849)

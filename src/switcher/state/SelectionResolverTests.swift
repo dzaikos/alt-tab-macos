@@ -599,4 +599,29 @@ final class SelectionResolverTests: XCTestCase {
                        currentWindowIsDrawn: SelectionResolver.currentWindowIsDrawn(terminal))
         XCTAssertEqual(SelectionResolver.decide(i), .resetThenSelect(1))
     }
+    // MARK: re-anchoring the hover
+
+    /// A tile inserted before the hovered one moves its index. An index alone would still be in bounds and
+    /// would now point at the neighbour — the highlight would silently be on the wrong window.
+    func testHoverFollowsItsWindowWhenTheListGrowsBeforeIt() {
+        XCTAssertEqual(SelectionResolver.reanchorHover(target: "b", in: ["new", "a", "b", "c"]), 2)
+    }
+
+    func testHoverFollowsItsWindowWhenTheListShrinksBeforeIt() {
+        XCTAssertEqual(SelectionResolver.reanchorHover(target: "c", in: ["b", "c"]), 1)
+    }
+
+    /// Gone means gone. The highlight is not inherited by whoever took the slot.
+    func testHoverIsClearedWhenItsWindowLeaves() {
+        XCTAssertNil(SelectionResolver.reanchorHover(target: "b", in: ["a", "c"]))
+    }
+
+    func testNoHoverStaysNoHover() {
+        XCTAssertNil(SelectionResolver.reanchorHover(target: nil, in: ["a", "b"]))
+    }
+
+    func testHoverIsUnchangedWhenNothingMoved() {
+        XCTAssertEqual(SelectionResolver.reanchorHover(target: "b", in: ["a", "b", "c"]), 1)
+    }
+
 }

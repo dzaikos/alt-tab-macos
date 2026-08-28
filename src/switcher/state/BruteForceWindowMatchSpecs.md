@@ -52,6 +52,14 @@ switcher, with the default pick landing past where it had been.
 The on-screen gate added for the same collision does not reach this one: an inactive tab of another window is
 not on screen either, so it looks exactly like one of ours.
 
+**The caller must source those frames from the WindowServer, not from the tracked window list.** The rule can
+only reject what it knows about, and at launch this scan routinely runs before the app's second window has
+been tracked: the list is then empty, every candidate sits on top of nothing, and the tabs of a window we had
+not seen yet are adopted as the requester's. Two real windows end up in one tab group, the second hidden
+inside it and no longer offered (T-19, 2026-08-25: `requester=#52149@(80,600) others=[]`, then two tabs at
+(80,80) adopted). The WindowServer's on-screen list is complete from the first scan. Read `requester=`/
+`others=` in the scan log before believing this gate did anything.
+
 `isPlausibleInactiveTab` rejects a candidate that sits **exactly on another of this app's tracked windows**
 while not sitting on the requester — a tab is positioned by its parent, so that frame names its parent. The
 test is one-sided on purpose. Merge All Windows never converges the absorbed windows' frames (they keep their

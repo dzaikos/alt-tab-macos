@@ -30,7 +30,7 @@ Mirrors `WsEventRoutingTests.swift` 1:1.
 - **testUnknownIdsAreNil** — heartbeat/other ids (1502, 1503, 1322, 0, 999) decode to nil.
 
 ### B. Action mapping
-- **testActionForEachNotification** — created→acquireAndDiscriminate, destroyed→remove, moved/resized→updateGeometry, focused→bumpFocusOrder, orderedIn/orderedOut→refreshVisibility, added/removed-Space→updateSpaceMembership, current/active-Space→spaceTransition.
+- **testActionForEachNotification** — created→acquireAndDiscriminate, destroyed→remove, moved/resized→updateGeometry, focused→noteFocusEvent, orderedIn/orderedOut→refreshVisibility, added/removed-Space→updateSpaceMembership, current/active-Space→spaceTransition.
 
 ### C. Payload
 - **testOnlySpaceMembershipNotificationsCarrySpaceId** — added/removed-from-Space carry a Space id; all others do not.

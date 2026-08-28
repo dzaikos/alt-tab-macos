@@ -25,7 +25,15 @@ class TrackedWindowStateBridge {
     /// capture is actually read as.
     static func dispatch(_ input: ReducerInput) {
         var state = snapshot()
-        let effects = WindowEventReducer.reduce(&state, input)
+        var effects = WindowEventReducer.reduce(&state, input)
+        // **The attention decision lands inside the SAME dispatch.** Deferring it to the next runloop turn
+        // would let the switcher draw one frame with the old order before the new one arrived, which is the
+        // "right, but late" verdict the QA matrix scores separately from being right.
+        let attention = AttentionEngine.dispatched(input)
+        if let attention {
+            effects += WindowEventReducer.reduce(&state, .attentionCommitted(wid: attention.wid,
+                observed: attention.observed, at: state.now))
+        }
         apply(state)
         execute(effects)
         logDecisions(input, effects)
@@ -52,11 +60,13 @@ class TrackedWindowStateBridge {
         switch input {
         case .windowCreated, .windowDestroyed, .windowMovedOrResized, .windowOrderedIn, .windowOrderedOut,
              .windowFocused, .spaceMembershipChanged, .spaceTransitionStarted, .spaceChangeSettled,
-             .appActivated, .systemReshow:
+             .appActivated:
             return true
+        case .attentionCommitted:
+            return false
         case .discoveryLanded, .titleAndTabsRead, .windowServerStateRead, .spacesSynced,
              .axFocusedWindowRead, .livenessConfirmedDead, .cgsWindowListsRead, .zOrderRead,
-             .holdReleaseCheck, .dragOutCheck, .altTabFocusedWindowInFrontmostApp, .focusBurstResolved:
+             .holdReleaseCheck, .dragOutCheck, .altTabFocusedWindowInFrontmostApp, .axFocusedWindowReadFailed:
             return false
         }
     }
@@ -247,8 +257,6 @@ class TrackedWindowStateBridge {
                 }
             case .bumpFocusViaAxBackstop(let pid):
                 WindowServerEvents.bumpFocusOnActivation(pid)
-            case .resolveFocusAfterBurst(let pid, let runStartedAt):
-                WindowServerEvents.resolveFocusAfterBurst(pid, runStartedAt)
             case .checkShortcutsForFocusedWindow:
                 if let frontmostPid = Applications.frontmostPid,
                    let frontmostApp = Applications.findOrCreate(frontmostPid, false),

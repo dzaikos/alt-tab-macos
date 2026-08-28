@@ -172,6 +172,8 @@ extension TilesPanel: NSWindowDelegate {
         // -render and let the reconcile's re-layout race the first frame.)
         let refreshObserver = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue, false, 0) { observer, _ in
             if let observer { CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, .commonModes) }
+            // The show is its own reason to re-read the world, and it does not wait out any quiet period:
+            // a correction that lands after the user has already chosen is worth nothing.
             Applications.manuallyRefreshAllWindows()
         }
         CFRunLoopAddObserver(CFRunLoopGetMain(), refreshObserver, .commonModes)

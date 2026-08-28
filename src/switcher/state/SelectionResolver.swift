@@ -270,4 +270,17 @@ enum SelectionResolver {
         // backfill — the wrapper treats a no-change as a no-op.
         return .ensureTargetSet(i.selectedIndex)
     }
+    /// **Where the hover highlight belongs after the list changed under it.**
+    ///
+    /// `hoveredIndex` is a position, and a structural change keeps it a valid position while making it point
+    /// at a different window: insert or remove a tile before the hovered one and the highlight silently slides
+    /// to a neighbour. A bounds check cannot see that, because nothing is out of bounds.
+    ///
+    /// So the hover is re-derived from the window it MEANT. Gone means gone: a window that left the list takes
+    /// its highlight with it rather than handing it to whoever inherited the slot.
+    static func reanchorHover(target: String?, in ids: [String]) -> Int? {
+        guard let target else { return nil }
+        return ids.firstIndex(of: target)
+    }
+
 }

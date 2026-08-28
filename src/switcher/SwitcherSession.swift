@@ -36,6 +36,11 @@ final class SwitcherSession {
     var selectedIndex: Int = 0
     var hoveredIndex: Int?
     var selectedTarget: String?
+    /// The window `hoveredIndex` MEANS, so the highlight can be re-anchored when the list changes under it.
+    /// An index alone survives a structural change as a valid number pointing at a different window: insert
+    /// or remove a tile before the hovered one and the hover silently moves to its neighbour, which the
+    /// bounds check cannot catch because the index is still in range.
+    var hoveredTarget: String?
     /// True once the USER moved the selection themselves (cycled with the shortcut/arrows, or hovered), as
     /// opposed to it sitting on the default pick. It decides whether `selectedTarget` is a commitment to
     /// follow or just where the default landed: a user's pick must stay on ITS window however the list

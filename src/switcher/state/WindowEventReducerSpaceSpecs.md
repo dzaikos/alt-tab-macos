@@ -83,3 +83,25 @@ reports a non-zero `spaceTypeMask` for one it places, and passes the contradicti
   are hiding it with no recovery path or inventing a Space other rules would read as truth.
 - **testAPlacedWindowStillTakesItsNewSpace** — a real answer always beats the keep, so a window that genuinely
   changed Space is not frozen at its old one.
+
+### E. A transition that never commits, and transitions that overlap
+
+Both shapes became reachable when the QA harness learned to synthesize a dock swipe. A commanded
+`SLSManagedDisplaySetCurrentSpace` always commits and always finishes before the next one starts, so neither
+could be produced before, and neither was pinned.
+
+An **abandoned swipe** — fingers travel below the Dock's commit threshold and lift — fires the transition's
+leading edge and then settles on the Space it started from. The WindowServer genuinely begins moving windows
+in between, so this is not a no-op at the event layer, only at the answer layer.
+
+- **testATransitionThatNeverCommitsLeavesTheModelWhereItWas** — start, settle, nothing moved: same current
+  Space, same visible Spaces, same windows. A model that treated the leading edge as the answer would be
+  filtering for a Space the user never reached, and nothing later would correct it.
+- **testAnAbandonedTransitionStillRequeries** — the reducer cannot tell an abandoned transition from a
+  completed one; only the answer can. So the settled pass asks either way, and the two cases converge on the
+  answer rather than on a guess.
+- **testOverlappingTransitionsAreIdempotent** — swipes faster than the animation put two leading edges back
+  to back with no settle between them. The edge holds no per-transition state, so the second is exactly the
+  first.
+
+Live counterparts: `spaces` SP-05 (abandoned swipe) and SP-06 (three overlapping swipes) in `alt-tab-qa`.

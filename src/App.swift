@@ -329,7 +329,10 @@ class App: AppCenterApplication {
         if session.isFirstSummon || shortcutIndex != session.shortcutIndex {
             NSScreen.updatePreferred()
             if isVeryFirstSummon {
+                // The last guess before the user looks. With the startup re-seeding above it, this normally
+                // finds nothing to change and draws nothing twice — which is what it was always meant to do.
                 Windows.sortByLevel()
+                Windows.endStartupOrderSeeding()
                 isVeryFirstSummon = false
             }
             session.isFirstSummon = false
@@ -429,12 +432,11 @@ class App: AppCenterApplication {
         // to have run (the sweep bails on an empty Space list). Deferred a beat so it doesn't compete with the
         // rest of launch.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            // The seed is NOT fired on the next line any more. This refresh is asynchronous: measured
+            // 2026-08-25, its windows land ~280ms later, so a seed here ranked an empty model and the
+            // first-summon call was left doing the whole job, after that summon had already drawn.
+            // `Windows.reseedZOrderDuringStartup` re-makes the guess as the windows actually arrive.
             Applications.manuallyRefreshAllWindows()
-            // Seed the MRU from screen stacking HERE, off the critical path, rather than only on the first
-            // summon: the query blocks, so its answer lands after that summon's first render and the user
-            // watches the list re-order. Seeded now, the first summon's own call finds nothing to change and
-            // draws nothing twice. It still runs there, for the windows this pass could not see yet.
-            Windows.sortByLevel()
         }
         KeyboardEvents.addEventHandlers()
         // Evaluate the "ignore shortcuts" exception for whatever app is already frontmost at launch (#5842):
@@ -445,6 +447,11 @@ class App: AppCenterApplication {
         }
         CursorEvents.observe()
         TrackpadEvents.observe()
+        // With the other taps, not with `WindowServerEvents`: it needs Accessibility (`tapCreate` returns nil
+        // without it) and the input-devices runloop, neither of which exists before this point.
+        WindowAttentionEvents.observe()
+        // Needs the AX runloop `BackgroundWork.start()` created, so it cannot go with the launch-time setup.
+        AxObserverRegistry.shared.startRecoveryTicks()
         CliEvents.observe()
         App.sparkleDelegate = SparkleDelegate()
         App.updaterController = SPUStandardUpdaterController(

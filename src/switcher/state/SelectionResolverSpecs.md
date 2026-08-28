@@ -2,6 +2,15 @@
 
 > **Line coverage:** `SelectionResolver.swift` 93% · _refreshed 2026-05-27 by `/coverage-explore`_
 
+## Where the hover highlight goes when the list changes (`reanchorHover`)
+
+- the hover follows the WINDOW it was on, not the position it occupied
+- a window inserted or removed before it moves its index, and the highlight moves with the window
+- a window that left the list takes its highlight with it: hover is cleared, never inherited by whoever
+  took the slot
+- no hover means no hover; there is nothing to re-anchor
+
+
 ## Summary
 
 `SelectionResolver` decides **which tile is highlighted** while the switcher is open. Every time the

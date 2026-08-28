@@ -9,13 +9,14 @@ class Windows {
     /// re-showing a window it had hidden) is neither stranded at the back nor wrongly given a front the user
     /// has since left. Cleared on destroy/removal. See `TrackedWindowState.FocusPromotion`.
     static var windowsPendingFocusPromotion = [CGWindowID: TrackedWindowState.FocusPromotion]()
-    /// wids flagged brand-new by a WindowServer `windowCreated` event, not yet promoted in the MRU. A new window
-    /// must land at the front, but the focus event (808) that would do it isn't a reliable trigger: it only
-    /// fires while the window's app is frontmost, and even then can be *processed* a beat late — after the user
-    /// moved on (cmd-N burst, then open AltTab) — where the `isActive` guard in `bumpFocusOrder` drops it and
-    /// strands the window at the back. So `appendWindow` promotes any window in this set the moment it's tracked,
-    /// independent of discovery path (event or full rescan) and of focus events; `bumpFocusOrder` also honors it
-    /// for the create-after-append ordering. Consumed on the first promotion; cleared on destroy/removal.
+    /// **Wids the WindowServer said were BORN, as opposed to reused.** A create event (811) is the only thing
+    /// that tells the two apart, and the difference decides whether an arrival may take the front: a wid that
+    /// joins the visible Space with no create is a tab switch minting nothing, so the user went there, while a
+    /// wid that was born joins that same Space just by existing. Reading the join as attention fronted every
+    /// new window whatever the user was doing (WL-02, twenty background windows; WL-03, a launch finishing
+    /// after the user had moved on), so `discoveryLanded` keeps the promotion for a created wid only when it
+    /// took another window's place. A window that really did take keys is fronted by its app's own answer, not
+    /// from here. Also gates tab-grouping's `activeIsNewlyDiscovered`. Cleared on focus, destroy and removal.
     static var recentlyCreatedWindows = Set<CGWindowID>()
     /// wids that got a `windowRemovedFromSpace` (1326) while still UNtracked — the delta was dropped because
     /// there was no `Window` to apply it to. During a rapid tab burst a new tab backgrounds (loses its Space)
@@ -241,6 +242,7 @@ class Windows {
         shouldRestoreDefaultSelectionOnSearchClear = false
         shouldSelectBestMatchOnSearchChange = false
         applySelectionDecision(decision, session: session)
+        reanchorHover(session)
     }
 
     /// The kernel's view of this refresh, plus the one measurement that has to be taken on the FIRST one:
@@ -295,11 +297,25 @@ class Windows {
         }
     }
 
+    /// Re-derive the hover highlight from the window it meant, after every refresh that may have reordered
+    /// the list. Repaints both the tile that is losing it and the one taking it, so no stale highlight is left
+    /// drawn on a tile that is no longer hovered.
+    private static func reanchorHover(_ session: SwitcherSession) {
+        guard let target = session.hoveredTarget else { return }
+        let previous = session.hoveredIndex
+        let current = SelectionResolver.reanchorHover(target: target, in: list.map { $0.id })
+        guard current != previous else { return }
+        session.hoveredIndex = current
+        if current == nil { session.hoveredTarget = nil }
+        [previous, current].compactMap { $0 }.forEach { TilesView.highlight($0) }
+    }
+
     private static func applySelectionDecision(_ decision: SelectionDecision, session: SwitcherSession) {
         switch decision {
         case .clearTargetAndHover:
             session.selectedTarget = nil
             session.hoveredIndex = nil
+            session.hoveredTarget = nil
         case .resetThenSelect(let idx):
             resetForInitialPick(session)
             updateSelectedAndHoveredWindowIndex(idx)
@@ -324,6 +340,7 @@ class Windows {
         TilesView.highlight(oldIndex)
         if let oldHovered = session.hoveredIndex {
             session.hoveredIndex = nil
+            session.hoveredTarget = nil
             TilesView.highlight(oldHovered)
         }
     }
@@ -338,6 +355,7 @@ class Windows {
         if fromMouse && (newIndex != session.hoveredIndex || lastWindowActivityType == .focus) {
             let oldIndex = session.hoveredIndex
             session.hoveredIndex = newIndex
+            session.hoveredTarget = list[newIndex].id
             if let oldIndex {
                 TilesView.highlight(oldIndex)
             }
@@ -440,6 +458,39 @@ class Windows {
     /// first render and the user watches the list re-order. Seeded at launch, the first summon's call finds
     /// nothing to change and the reducer emits no re-render at all; it still runs there, for whatever the
     /// launch pass could not see yet.
+    /// Coalesces the startup re-seeds. A launch discovers windows in bursts and the stacking query BLOCKS,
+    /// so this is one seed at the head of a burst plus one trailing seed when it stops, not one per window.
+    private static let startupZOrderThrottler = Throttler(delayInMs: 250)
+
+    /// Whether the order is still only the startup guess. True until the user first summons, after which
+    /// their own focus history is the order and stacking has no business touching it.
+    private(set) static var startupOrderIsAGuess = true
+
+    /// **The startup guess, re-made as windows turn up.**
+    ///
+    /// AltTab launches into a desktop it did not watch being built, so it has no focus history and has to
+    /// guess; screen stacking is that guess. The guess used to be fired once a second after launch and once
+    /// more on the first summon. Measured 2026-08-25 across four QA processes: the startup inventory it is
+    /// meant to rank lands ~280ms AFTER that timer, because `manuallyRefreshAllWindows` is asynchronous and
+    /// `sortByLevel` was called on the line below it. So the launch guess ranked a model that was still
+    /// empty, and the only call that did anything was the first-summon one — which answers after that
+    /// summon's first render, so the user watched the list re-order under them (S-12, and G-14 where it
+    /// moved the MRU front mid-hold).
+    ///
+    /// Re-seeding per discovery settles the order while nobody is looking instead of guessing once against
+    /// whatever happens to exist at one arbitrary instant. It is the same progressive-correction shape the
+    /// rest of the pipeline uses: publish as soon as there is better information, rather than waiting for a
+    /// moment that can be defined as complete.
+    static func reseedZOrderDuringStartup() {
+        guard startupOrderIsAGuess else { return }
+        startupZOrderThrottler.throttleOrProceed { sortByLevel() }
+    }
+
+    /// The user has summoned: from here the order is theirs, not a guess about a past we did not watch.
+    static func endStartupOrderSeeding() {
+        startupOrderIsAGuess = false
+    }
+
     static func sortByLevel() {
         CGSCallScheduler.windowsInSpaces(Spaces.visibleSpaces) { wids in   // `thenMain`: already on main
             TrackedWindowStateBridge.dispatch(.zOrderRead(widsTopFirst: wids))
@@ -497,6 +548,8 @@ class Windows {
             if window.axUiElement != windowAxUiElement {
                 window.rebindAxElement(windowAxUiElement)
             }
+            // AX answered for a window that had been kept on WindowServer evidence alone.
+            promoteVerified(wid)
             // on any window event, we take the opportunity to refresh all window attributes
             window.updateFromAxAttributes(title, size, position, isFullscreen, isMinimized)
             return (window, false)
@@ -505,6 +558,52 @@ class Windows {
         let window = Window(windowAxUiElement, app, wid, title, isFullscreen, isMinimized, position, size)
         appendWindow(window)
         return (window, true)
+    }
+
+    /// **A window the WindowServer lists that AX could not answer for.** Tracked, not shown: the app may be
+    /// hung, quarantined, or still coming up, and the alternative — dropping the row — is how the window a
+    /// click can name by wid becomes untrackable for as long as its app stays busy.
+    ///
+    /// **Only for a window the user was demonstrably directed to.** Retaining EVERY unresolvable WindowServer
+    /// row was tried and reverted: a healthy app fails to resolve a wid constantly, because a background
+    /// native tab exposes no AX window element at all, and tracking those made them look already-tracked to
+    /// the inactive-tab brute force, which then never went looking for them. A tab group came back with one
+    /// member instead of two (D-01, D-02). Gating on "is the app unresponsive" did not save it either: at
+    /// cold start apps legitimately answer `cannotComplete` for a moment and get flagged.
+    ///
+    /// A click is different. It names one wid, the user just went there, and nothing else is competing to
+    /// claim that window — so representing it costs nothing even if AX never answers.
+    ///
+    /// The criteria are otherwise WindowServer-only and strict, because nothing has vouched for this window:
+    /// it must be at an application level and big enough to be a real window.
+    @discardableResult
+    static func findOrCreateCandidate(_ raw: WsRawWindow, _ app: Application) -> Window? {
+        if let existing = byWindowId[raw.wid] { return existing }
+        guard WindowDiscriminator.isApplicationWindow(raw),
+              raw.bounds.width >= 100, raw.bounds.height >= 50 else { return nil }
+        let window = Window(nil, app, raw.wid, raw.title.isEmpty ? nil : raw.title,
+            WsWindowState.isFullscreen(raw), WsWindowState.isMinimized(raw),
+            raw.bounds.origin, raw.bounds.size, .directedCandidate)
+        appendWindow(window)
+        Logger.debug { "ws candidate #\(raw.wid) \(app.debugId): the user was directed to it, AX silent" }
+        return window
+    }
+
+    /// AX finally answered for a window that was kept on WindowServer evidence alone. Nothing about the
+    /// window changes except what may be claimed about it.
+    static func promoteVerified(_ wid: CGWindowID) {
+        guard let window = byWindowId[wid], window.axStatus != .axVerified else { return }
+        window.axStatus = .axVerified
+        window.application.removeWindowlessAppWindow()
+    }
+
+    /// The user was demonstrably directed to this window — a click named its wid, or AltTab focused it — so
+    /// it is shown on that evidence rather than waiting for an app that may never answer.
+    static func promoteDirected(_ wid: CGWindowID) {
+        guard let window = byWindowId[wid], !window.axStatus.isPresentable else { return }
+        window.axStatus = .directedCandidate
+        window.application.removeWindowlessAppWindow()
+        Logger.debug { "ws candidate #\(wid) promoted: the user was directed to it" }
     }
 
     static func appendWindow(_ window: Window) {

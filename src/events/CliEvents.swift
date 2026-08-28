@@ -92,6 +92,13 @@ class CliServer {
         if rawValue == "--qa-state" {
             return qaState()
         }
+        // The provider timeline, drained rather than read: each record is reported exactly once, so a QA test
+        // gets the events of its own session and not the whole run's backlog. `alt-tab-qa` writes them out as
+        // NDJSON beside `results.json` (`TrackingTelemetryNdjson`).
+        if rawValue == "--qa-telemetry" {
+            return QaTelemetryDrain(v: TrackingTelemetryState.schemaVersion,
+                records: TrackingTelemetryRecorder.drain())
+        }
         if rawValue.hasPrefix("--qa-mark=") {
             let mark = String(rawValue.dropFirst("--qa-mark=".count))
             Logger.info { "QAMARK \(mark)" }
@@ -206,7 +213,8 @@ class CliServer {
             },
             groups: groups,
             windows: windows,
-            tiles: renderedTiles())
+            tiles: renderedTiles(),
+            tracking: TrackingTelemetryRecorder.state.summary())
     }
 
     /// What the tiles on screen are CURRENTLY showing, as opposed to what the model says they should show.
@@ -245,6 +253,13 @@ class CliServer {
         var windows: [QaWindow]
         /// empty while the switcher is closed — there is nothing drawn to report
         var tiles: [QaTile]
+        /// provider health and the last committed attention decision (`TrackingTelemetryState`)
+        var tracking: TrackingTelemetrySummary
+    }
+
+    private struct QaTelemetryDrain: Codable {
+        var v: Int
+        var records: [TelemetryRecord]
     }
 
     private struct QaTile: Codable {
@@ -346,7 +361,7 @@ class CliClient {
     static func detectCommand() -> String? {
         let args = CommandLine.arguments
         if args.count == 2 && !args[1].starts(with: "--logs=") {
-            if args[1] == "--list" || args[1] == "--detailed-list" || args[1] == "--qa-state" || args[1] == "--hide" || args[1].hasPrefix("--qa-mark=") || args[1].hasPrefix("--focus=") || args[1].hasPrefix("--focusUsingLastFocusOrder=") || args[1].hasPrefix("--show=") {
+            if args[1] == "--list" || args[1] == "--detailed-list" || args[1] == "--qa-state" || args[1] == "--qa-telemetry" || args[1] == "--hide" || args[1].hasPrefix("--qa-mark=") || args[1].hasPrefix("--focus=") || args[1].hasPrefix("--focusUsingLastFocusOrder=") || args[1].hasPrefix("--show=") {
                 return args[1]
             }
         }

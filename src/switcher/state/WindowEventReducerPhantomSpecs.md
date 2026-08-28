@@ -48,40 +48,38 @@ Mirrors `WindowEventReducerPhantomTests.swift` 1:1.
 - **testNonFrontWindowOfActiveAppStillFlagged** — app frontmost but the window sits at MRU slot 3, so it is
   not the one the user is looking at → still a phantom.
 
-### C. Focus clears a stale verdict immediately
+### C. Attention clears a stale verdict immediately
 
 The exemption in B is only consulted when the CGS pass runs, and that pass runs on a show, landing a beat
 AFTER the switcher appears. So it does not cover the fast path the reporter actually hit: open Slack, tap
 the shortcut straight away, and the switcher is built while the stale verdict still hides the window that
-was just focused. Focusing a window is proof it is real, so the verdict is now cleared at that moment
-instead of waiting for a pass (`TrackedWindowState.clearPhantomOnFocus`).
+was just focused. A committed attention decision is proof the window is real, so the verdict is cleared at
+that moment instead of waiting for a pass (`TrackedWindowState.clearPhantomOnFocus`).
 
-- **testFocusClearsAStalePhantomLatch** — a latched-phantom window that receives focus is real immediately.
-- **testFocusUnphantomingEmitsRemoveWindowlessPlaceholder** — that un-phantoming also drops the app's stale
-  placeholder, so the fast path doesn't trade the wrong-window bug for the duplicate-tile one.
-- **testFocusingARealWindowEmitsNoPlaceholderRemoval** — focusing an already-real window emits nothing, so
+- **testAttentionClearsAStalePhantomLatch** — a latched-phantom window attention lands on is real
+  immediately.
+- **testAttentionUnphantomingEmitsRemoveWindowlessPlaceholder** — that un-phantoming also drops the app's
+  stale placeholder, so the fast path doesn't trade the wrong-window bug for the duplicate-tile one.
+- **testAttentionOnARealWindowEmitsNoPlaceholderRemoval** — an already-real window emits nothing, so
   ordinary switching doesn't churn.
 
-### D. Focus that arrives as an AX READ clears it too
+### D. The same, for the window a reopened app comes back to (#5849, second report)
 
-C only covers focus that arrives as an 808. Two focus signals arrive as an AX `kAXFocusedWindow` READ
-instead — the activation backstop (an activation that emits no 808) and the creation seed (a window
-discovered while its app was already frontmost) — and both used to bump the MRU by calling
-`Windows.updateLastFocusOrder` straight from the shell, bypassing the reducer's focus path and therefore the
-clear in C. Reopening Slack from the Dock reaches the front through the activation, so the second #5849
-report hit exactly that hole: the switcher summoned right after showed the app as a closed-app icon while
-its hidden real window held slot 0, and the default pick landed on a third app. Both reads are now the
-`.axFocusedWindowRead` input and share the one focus path; the gates they always had move with them.
+Reopening Slack from the Dock reaches the front through the ACTIVATION, which emits no 808 naming the
+window: the app's own answer to `kAXFocusedWindow` is the only signal there is. While that answer bumped the
+MRU straight from the shell it bypassed the clear in C, so the latch survived — the switcher summoned 130 ms
+later hid the window the user was looking at while it held slot 0, and the default pick skipped past it onto
+a third app. Every namer now reaches the model through `.attentionCommitted`, so there is one path and one
+clear.
 
-- **testActivationBackstopClearsAStalePhantomLatch** — the backstop read fronts the window and clears its
-  latch, dropping the placeholder its app grew.
-- **testActivationBackstopYieldsToTheActivations808** — once the activation's own 808 has bumped, the read is
-  the stale weak signal (#5596) and decides nothing.
-- **testActivationBackstopIgnoresANoLongerFrontmostApp** — a read landing after the user moved on doesn't
-  front that app's window.
-- **testCreationSeedClearsAStalePhantomLatch** — the creation seed clears the latch the same way.
-- **testCreationSeedIgnoresABackgroundApp** — `kAXFocusedWindow` answers "which window WOULD take keys",
-  which every app has at all times, so a background app's read fronts nothing (#5785).
+- **testTheReopenedWindowsLatchIsCleared** — the app's answer fronts the window, clears its latch, and drops
+  the placeholder its app grew.
+
+Which answers are worth anything is not decided here any more. `kAXFocusedWindow` reports "which window
+WOULD take keys", which every app has at all times, so an answer from an app the user is not in is a fact
+about that app rather than a bid for the front (#5785, a re-discovered QQ window offered as "the window you
+were on before"). That gate lives in `AttentionModel` —
+`testAnAnswerFromABackgroundAppIsRecordedAndMovesNothing` — and the reducer only sees what it committed.
 
 ### E. An app whose last window turns phantom gets its placeholder in the SAME pass
 

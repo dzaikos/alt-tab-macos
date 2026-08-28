@@ -401,59 +401,12 @@ final class TestReducerRunnerTests: XCTestCase {
         }
     }
 
-    /// Cmd+` ("Cycle Through Windows") raises a background window of the ALREADY-frontmost app with only an
-    /// order-in (815), never a focus event (808). The order-in must bump the MRU, or the switcher keeps
-    /// showing the pre-Cmd+` order (the second window is focused but AltTab "didn't notice").
-    func testInAppRaiseWithoutFocusEventBumpsTheMru() {
-        let focused = window(100, spaceIds: [3], lastFocusOrder: 0)   // the visible Finder window
-        let background = window(101, spaceIds: [3], lastFocusOrder: 1) // its sibling, one Cmd+` away
-        let harness = TestReducerRunner(initial: state(windows: [focused, background]))
-        harness.run([.input(.windowOrderedIn(wid: 101, now: 10.0, inSpaceTransition: false))])
-        XCTAssertEqual(harness.violations, [])
-        XCTAssertEqual(harness.state.window(101)?.lastFocusOrder, 0, "the raised window became the MRU front")
-        XCTAssertEqual(harness.state.window(100)?.lastFocusOrder, 1)
-    }
-
-    /// The order-in bump must NOT fire while an activation is in flight: the 808 storm already orders the
-    /// app's windows (first = focus, raise tail swallowed, #5596), and re-fronting an order-in there would
-    /// reverse that order. A live `pendingActivationRaises` entry naming this wid suppresses the bump —
-    /// `raiseTail`, not `wids`, since the tail's 808s have already drained the latter by the time its 815s
-    /// arrive (here spelled with `wids` empty to make exactly that state the one under test).
-    func testOrderInDuringActivationDoesNotBump() {
-        let focused = window(100, spaceIds: [3], lastFocusOrder: 0)
-        let raised = window(101, spaceIds: [3], lastFocusOrder: 1)
-        var s = state(windows: [focused, raised])
-        s.carried.pendingActivationRaises[500] = ActivationEntry(wids: [], until: 100.0, focusBumped: true,
-            raiseTail: [101])
-        let harness = TestReducerRunner(initial: s)
-        harness.run([.input(.windowOrderedIn(wid: 101, now: 10.0, inSpaceTransition: false))])
-        XCTAssertEqual(harness.state.window(101)?.lastFocusOrder, 1, "the activation's raise was NOT fronted")
-        XCTAssertEqual(harness.state.window(100)?.lastFocusOrder, 0)
-    }
-
-    /// #5875: alt-tab into Preview, then Cmd+` a beat later. AltTab raises exactly ONE window, so its
-    /// activation snapshots no raise tail — yet the plain 0.5s time gate swallowed the order-in anyway, the
-    /// MRU kept the window the user had just left, and the next alt-tab back landed on it again. In the
-    /// reported log the two misses are 442ms and 435ms after the activation; the cycles that worked were
-    /// ~900ms+ after it, i.e. past the window. Nothing snapshotted ⇒ nothing to mistake this for.
-    func testInAppRaiseBumpsRightAfterAnAltTabInitiatedActivation() {
-        let target = window(100, spaceIds: [3], lastFocusOrder: 0)    // the window alt-tab just focused
-        let sibling = window(101, spaceIds: [3], lastFocusOrder: 1)   // the one Cmd+` cycles to
-        var s = state(windows: [target, sibling])
-        s.carried.pendingActivationRaises[500] = ActivationEntry(wids: [], until: 10.5, focusBumped: true)
-        let harness = TestReducerRunner(initial: s)
-        harness.run([.input(.windowOrderedIn(wid: 101, now: 10.0, inSpaceTransition: false))])
-        XCTAssertEqual(harness.violations, [])
-        XCTAssertEqual(harness.state.window(101)?.lastFocusOrder, 0, "the cycled-to window became the MRU front")
-        XCTAssertEqual(harness.state.window(100)?.lastFocusOrder, 1)
-    }
-
     /// #5785, the stuck switcher: two alt-tabs in a row into the SAME app, 219ms apart (log2). The first is a
-    /// cross-app activation, which used to snapshot every Chrome window as raiseable for 0.5s; the second
-    /// focused another Chrome window, and its genuine 808 was read as that activation's raise tail. Since
-    /// re-focusing an already-focused window emits nothing, nothing ever corrected the order and every later
-    /// alt-tab landed on the window the user was already in. The second 808 must bump.
-    func testSecondAltTabIntoTheSameAppIsNotMistakenForTheActivationsRaiseTail() {
+    /// cross-app activation, the second a switch inside the app that is already frontmost — which produces no
+    /// activation at all, so AltTab naming its own target is the only thing that says the user moved. Since
+    /// re-focusing an already-focused window emits nothing either, a second switch that goes unheard is never
+    /// corrected, and every later alt-tab lands on the window the user is already in.
+    func testTwoAltTabsIntoTheSameAppBothMoveTheOrder() {
         let chromeA = window(100, spaceIds: [3], lastFocusOrder: 1)
         let chromeB = window(101, spaceIds: [3], lastFocusOrder: 2)
         let other = window(200, pid: 700, spaceIds: [3], lastFocusOrder: 0)   // the app we alt-tab away from
@@ -465,8 +418,10 @@ final class TestReducerRunnerTests: XCTestCase {
             // alt-tab 1: AltTab focuses Chrome's window A, so its activation carries the known target
             .setFrontmost(pid: 500),
             .input(.appActivated(pid: 500, now: 10.0, altTabTargetWid: 100)),
-            // alt-tab 2, a beat later: AltTab focuses window B and macOS reports the focus
-            .input(.windowFocused(wid: 101, now: 10.219)),
+            .input(.attentionCommitted(wid: 100, observed: 100, at: 10.0)),
+            // alt-tab 2, a beat later: AltTab focuses window B inside the app that is already frontmost, so
+            // our own switch names it. No activation follows, and the 808 it produces is not attention.
+            .input(.attentionCommitted(wid: 101, observed: 101, at: 10.219)),
         ])
         XCTAssertEqual(harness.violations, [])
         XCTAssertEqual(harness.state.window(101)?.lastFocusOrder, 0, "the second alt-tab's focus was heard")
@@ -490,15 +445,16 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.windowOrderedIn(wid: 150, now: 10.0, inSpaceTransition: false)),
             // the user alt-tabs to Chrome before that discovery lands
             .setFrontmost(pid: 500),
-            .input(.windowFocused(wid: 100, now: 10.1)),
+            .input(.attentionCommitted(wid: 100, observed: 100, at: 10.1)),
             .track(window(150, pid: 600, spaceIds: [3])),
             .input(.discoveryLanded(wid: 150, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
                                     queriedSpaceIds: [3], isOrderedIn: true, tabTitles: nil)),
         ])
         XCTAssertEqual(harness.violations, [])
         XCTAssertEqual(harness.state.window(100)?.lastFocusOrder, 0, "the window focused during the gap keeps the front")
-        XCTAssertEqual(harness.state.window(150)?.lastFocusOrder, 1, "the re-shown window sits behind it, not last")
-        XCTAssertEqual(harness.state.window(101)?.lastFocusOrder, 2)
+        // The re-shown window claims nothing of its own: an order-in is not attention, so it keeps the rank
+        // it had. Where it lands relative to the older windows is decided the next time its app speaks.
+        XCTAssertNotNil(harness.state.window(150))
     }
 
     /// The same order-in, but the window turns out to belong to an app that was NOT frontmost when it
@@ -521,47 +477,6 @@ final class TestReducerRunnerTests: XCTestCase {
         XCTAssertEqual(harness.state.window(150)?.lastFocusOrder, 1, "appended, not promoted")
     }
 
-    /// RECORDED 2026-07-28, macOS 26, Finder with 3 windows on one Space, activated from another app while
-    /// AltTab logged every event. The whole burst lands in ONE millisecond, and each window reports TWICE:
-    ///
-    ///     23:20:43.927  axFocusedWindowRead #45419   (the activation backstop's AX read, 49ms ahead)
-    ///     23:20:43.976  windowFocused    #45419 #45423 #45421   (808: the FOCUSED window first, then the
-    ///                                                            stack front-to-back)
-    ///     23:20:43.976  windowOrderedIn  #45419 #45423 #45421   (815: the same three, same order)
-    ///
-    /// Both halves must leave the MRU alone except for the focused window. The 808 tail is swallowed by the
-    /// activation snapshot; the 815 tail is suppressed by the order-in gate — and THAT is what this replays,
-    /// because the 815s arrive AFTER the 808s have consumed every snapshotted wid. A gate keyed on "the
-    /// snapshot still holds candidates" reads as equivalent, passes `testOrderInDuringActivationDoesNotBump`
-    /// (which hand-sets a full snapshot), and still lets the tail re-front each window in turn — the #5596
-    /// inversion, shipped and caught only by a live Finder activation. Hence a REPLAY of the real sequence
-    /// rather than a hand-built state: nothing here is set that the events themselves don't produce.
-    func testActivationRaiseBurstLeavesOnlyTheFocusedWindowAtTheFront() {
-        let focused = window(101, spaceIds: [3], lastFocusOrder: 1)     // Finder's own focused window
-        let secondFromFront = window(102, spaceIds: [3], lastFocusOrder: 2)
-        let thirdFromFront = window(103, spaceIds: [3], lastFocusOrder: 3)
-        let cameFrom = window(200, pid: 700, spaceIds: [3], lastFocusOrder: 0)   // the app we activate away from
-        var s = state(windows: [cameFrom, focused, secondFromFront, thirdFromFront], frontmostPid: 700)
-        s.apps[700] = TrackedApp(state: ApplicationState(pid: 700, bundleIdentifier: "com.anthropic.claudefordesktop",
-            localizedName: "Claude", isHidden: false), isActive: true)
-        let harness = TestReducerRunner(initial: s)
-        harness.run([
-            .setAppActive(pid: 500, isActive: true),
-            .input(.appActivated(pid: 500, now: 10.0, altTabTargetWid: nil)),
-            .input(.axFocusedWindowRead(wid: 101, viaActivationBackstop: true)),
-            .input(.windowFocused(wid: 101, now: 10.049)),
-            .input(.windowFocused(wid: 102, now: 10.049)),
-            .input(.windowFocused(wid: 103, now: 10.049)),
-            .input(.windowOrderedIn(wid: 101, now: 10.049, inSpaceTransition: false)),
-            .input(.windowOrderedIn(wid: 102, now: 10.049, inSpaceTransition: false)),
-            .input(.windowOrderedIn(wid: 103, now: 10.049, inSpaceTransition: false)),
-        ])
-        XCTAssertEqual(harness.violations, [])
-        XCTAssertEqual(harness.state.window(101)?.lastFocusOrder, 0, "the focused window took the front")
-        XCTAssertEqual(harness.state.window(200)?.lastFocusOrder, 1, "the app we left keeps the slot behind it")
-        XCTAssertEqual(harness.state.window(102)?.lastFocusOrder, 2, "raised, not focused: order untouched")
-        XCTAssertEqual(harness.state.window(103)?.lastFocusOrder, 3)
-    }
 
     /// RECORDED 2026-07-29, macOS 26, #5849 follow-up (SamadiPour): two Chrome windows with another app's
     /// window between them in the MRU. Fullscreen the front Chrome window, then leave fullscreen, and the
@@ -571,9 +486,10 @@ final class TestReducerRunnerTests: XCTestCase {
     /// own siblings jump, because the app-is-active guard spares the other app.
     ///
     /// The timestamps are the capture's, and the one that matters is the LAST: the Space notification lands
-    /// 519ms AFTER the order-ins, so `inSpaceTransition` is false throughout the re-show and cannot be the
-    /// gate. The order-outs the enter produced are — a window the OS took off screen is being re-shown, not
-    /// raised.
+    /// 519ms AFTER the order-ins, so `inSpaceTransition` was false throughout the re-show and could never have
+    /// been the gate. Kept as a replay of the real capture: the inference that produced the bug is gone
+    /// (nothing physical may move the order), so this can no longer fail for its original reason, and it is
+    /// here to say that the recorded sequence still lands where the user left it.
     func testLeavingFullscreenDoesNotRefrontTheAppsOtherWindows() {
         let wentFullscreen = window(37901, spaceIds: [4], lastFocusOrder: 0)
         let otherApp = window(44617, pid: 700, spaceIds: [4], lastFocusOrder: 1)
@@ -600,36 +516,6 @@ final class TestReducerRunnerTests: XCTestCase {
         XCTAssertEqual(harness.state.window(51081)?.lastFocusOrder, 2, "the untouched sibling stayed where it was")
     }
 
-    /// The re-show exemption is consumed, not sticky: once a window is back on screen the NEXT order-in is a
-    /// genuine raise again. Otherwise a single Space switch would deafen Cmd+` for every window it re-showed.
-    func testAnInAppRaiseAfterAReshowStillBumps() {
-        let focused = window(100, spaceIds: [3], lastFocusOrder: 0)
-        let background = window(101, spaceIds: [3], lastFocusOrder: 1)
-        let harness = TestReducerRunner(initial: state(windows: [focused, background]))
-        harness.run([
-            .input(.windowOrderedOut(wid: 101, inSpaceTransition: false)),
-            .input(.windowOrderedIn(wid: 101, now: 10.0, inSpaceTransition: false)),   // re-show: no bump
-            .input(.windowOrderedIn(wid: 101, now: 11.0, inSpaceTransition: false)),   // Cmd+`: bump
-        ])
-        XCTAssertEqual(harness.violations, [])
-        XCTAssertEqual(harness.state.window(101)?.lastFocusOrder, 0)
-        XCTAssertEqual(harness.state.window(100)?.lastFocusOrder, 1)
-    }
-
-    /// A background app re-ordering one of its own windows must not churn the MRU — same "app must be active"
-    /// guard as the focus (808) path.
-    func testOrderInOfInactiveAppsWindowDoesNotBump() {
-        let front = window(100, spaceIds: [3], lastFocusOrder: 0)
-        var s = state(windows: [front])
-        let bgWindow = window(200, pid: 700, spaceIds: [3], lastFocusOrder: 1)
-        s.windows.append(bgWindow)
-        s.apps[700] = TrackedApp(state: ApplicationState(pid: 700, bundleIdentifier: "com.other",
-            localizedName: "Other", isHidden: false), isActive: false)
-        let harness = TestReducerRunner(initial: s)
-        harness.run([.input(.windowOrderedIn(wid: 200, now: 10.0, inSpaceTransition: false))])
-        XCTAssertEqual(harness.state.window(200)?.lastFocusOrder, 1, "background app's order-in was ignored")
-        XCTAssertEqual(harness.state.window(100)?.lastFocusOrder, 0)
-    }
 
     // MARK: - the handover edge (`recordHandover`)
     //
@@ -826,6 +712,39 @@ final class TestReducerRunnerTests: XCTestCase {
         XCTAssertEqual(mru(harness), [100, 101, 102])
     }
 
+    /// **A reorder nobody is told about is a reorder the user watches happen.** The seed writes the stacking
+    /// order into `lastFocusOrder` and then asks `recomputeFocusRanks` what moved — but by then the write has
+    /// already landed, so on a cold model (every `focusedAt` still 0) the re-derivation finds its own answer
+    /// in place and reports nothing changed. The reducer then emits no log and, worse, no `.refreshUi`: the
+    /// order really did change and the open switcher keeps drawing the old one.
+    ///
+    /// Live evidence, 2026-08-25 QA run: G-14's process reordered the MRU front onto a Finder window with no
+    /// `zOrder seed reordered` line anywhere in its debug log — the change was visible only in telemetry.
+    /// Three investigations dead-ended on that silence.
+    func testZOrderReportsWhatItMovedOnAColdModel() {
+        let harness = TestReducerRunner(initial: state(windows: [
+            window(100, spaceIds: [3], lastFocusOrder: 0),
+            window(101, spaceIds: [3], lastFocusOrder: 1),
+            window(102, spaceIds: [3], lastFocusOrder: 2)]))
+        harness.run([.input(.zOrderRead(widsTopFirst: [102, 100, 101]))])
+        XCTAssertEqual(mru(harness), [102, 100, 101])
+        XCTAssertEqual(harness.refreshes.flatMap { $0.wids }.sorted(), [100, 101, 102])
+        XCTAssertTrue(harness.trace.contains { $0.contains("zOrder seed reordered") }, "\(harness.trace)")
+    }
+
+    /// The other side of it: a seed that genuinely changes nothing must stay silent, or every first summon
+    /// repaints for no reason.
+    func testZOrderThatChangesNothingSaysNothing() {
+        let harness = TestReducerRunner(initial: state(windows: [
+            window(100, spaceIds: [3], lastFocusOrder: 0),
+            window(101, spaceIds: [3], lastFocusOrder: 1),
+            window(102, spaceIds: [3], lastFocusOrder: 2)]))
+        harness.run([.input(.zOrderRead(widsTopFirst: [100, 101, 102]))])
+        XCTAssertEqual(mru(harness), [100, 101, 102])
+        XCTAssertEqual(harness.refreshes.flatMap { $0.wids }, [])
+        XCTAssertFalse(harness.trace.contains { $0.contains("zOrder seed reordered") })
+    }
+
     /// A window the query cannot see — a background tab, another Space, minimized — is not being ranked by
     /// it. Those keep their relative order, behind the ones it did see.
     func testZOrderPutsWindowsItCannotSeeBehindTheStackedOnes() {
@@ -835,5 +754,41 @@ final class TestReducerRunnerTests: XCTestCase {
             window(102, spaceIds: [3], lastFocusOrder: 2)]))
         harness.run([.input(.zOrderRead(widsTopFirst: [102]))])
         XCTAssertEqual(mru(harness), [102, 100, 101])
+    }
+
+    // MARK: - switching to a tab we adopted but never grouped
+
+    /// Clicking a background tab fronts it even when we never managed to GROUP it (T-19).
+    ///
+    /// Finder's tabs share one title and keep a stale frame while they are backgrounded, so the AX-title
+    /// match names nothing and geometry sees two different positions: the tab sits tracked, Space-less and
+    /// ordered-out, linked to nobody. The switch is then a Space-join for a window `isTabbed` says nothing
+    /// about, which is why the gate used to write no focus at all — and the group that formed a beat later,
+    /// once the tab was on-screen and readable, re-elected the tab the user had just LEFT as the one it
+    /// draws. The switcher showed the wrong tab, and stayed wrong.
+    func testSwitchingToAnAdoptedButUngroupedTabFrontsIt() {
+        var active = window(549, spaceIds: [3], lastFocusOrder: 0)
+        active.isOrderedIn = true
+        let adopted = window(544, lastFocusOrder: 1)          // no Space, not ordered in, in no group
+        let harness = TestReducerRunner(initial: state(windows: [active, adopted]))
+        harness.run([.input(.spaceMembershipChanged(wid: 544, spaceId: 3, added: true, now: 100.0,
+                                                    inSpaceTransition: false))])
+        XCTAssertEqual(harness.violations, [])
+        XCTAssertEqual(mru(harness), [544, 549])
+        // and that is what decides the tile once the group finally forms
+        let members = [harness.state.window(549)!, harness.state.window(544)!].map { harness.state.tabWindow($0) }
+        XCTAssertEqual(TabGroupResolver.groupRepresentative(members), 544)
+    }
+
+    /// The same shape with the app in the BACKGROUND is not a tab switch the user made, and must not front
+    /// anything: a window quietly rejoining a Space is not attention.
+    func testAnUngroupedTabJoiningASpaceOfAnInactiveAppDoesNotFront() {
+        var s = state(windows: [window(549, spaceIds: [3], lastFocusOrder: 0), window(544, lastFocusOrder: 1)])
+        s.apps[500]?.isActive = false
+        s.frontmostPid = nil
+        let harness = TestReducerRunner(initial: s)
+        harness.run([.input(.spaceMembershipChanged(wid: 544, spaceId: 3, added: true, now: 100.0,
+                                                    inSpaceTransition: false))])
+        XCTAssertEqual(mru(harness), [549, 544])
     }
 }

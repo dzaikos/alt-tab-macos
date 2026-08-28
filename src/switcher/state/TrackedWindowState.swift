@@ -258,12 +258,6 @@ struct TrackedWindowState: Equatable {
     /// Deliberately NOT carried between dispatches: every dispatch stamps its own.
     var now: TimeInterval = 0
 
-    /// The window AltTab focused inside the app that was already frontmost, with the instant it did.
-    struct AltTabSameAppFocus: Equatable {
-        var wid: CGWindowID
-        var pid: pid_t
-        var at: TimeInterval
-    }
 
     /// One half of a Space HANDOVER, waiting for the other. See `TrackedWindow.replacedByWid`.
     struct SpaceHandoverHalf: Equatable {
@@ -307,25 +301,6 @@ struct TrackedWindowState: Equatable {
         /// RE-SHOW of one that had left it (Space switch, fullscreen exit, un-hide). Only the first is a focus
         /// signal — see `movedResizedOrOrderedIn`.
         var offScreen = Set<CGWindowID>()
-        /// per-app activation state for the 808 storm
-        var pendingActivationRaises = [pid_t: ActivationEntry]()
-        /// Per app, the 808 run that no activation explains — an app raising its own windows while it is
-        /// ALREADY frontmost (#5974). See `WindowEventReducer.focusBurstGap`.
-        var focusBursts = [pid_t: WindowEventReducer.FocusBurst]()
-        /// AltTab's own focus into the app that is already frontmost. No activation follows it, so
-        /// `ActivationFocusResolver.altTabIntentToRecord` deliberately keeps nothing (a leftover intent
-        /// reopens #5596) and the switch rides on a single 808 — which a burst in flight would swallow, with
-        /// nothing behind it to correct the order. Read ONLY by the burst path, never by the activation one.
-        var altTabSameAppFocus: AltTabSameAppFocus?
-        /// Until when a system re-show is considered in flight, so the OS putting the desktop back does not
-        /// read as the user raising each window (`WindowEventReducer.systemReshowMute`).
-        var systemReshowMuteUntil: TimeInterval = 0
-        /// The previous order-in (815), whatever it was for: the pair that lets the NEXT one tell a lone
-        /// raise from a member of a re-show burst (`WindowEventReducer.reshowBurstGap`). Recorded for
-        /// untracked wids too — a burst sweeps up every window on screen, and one we do not track yet is
-        /// still evidence that this is a burst.
-        var lastOrderInAt: TimeInterval = 0
-        var lastOrderInWid: CGWindowID?
         /// uptime of the most recent `windowCreated`
         var lastWindowCreatedAt: TimeInterval = 0
         /// The wid of that most recent `windowCreated` (the pair to `lastWindowCreatedAt`, exactly as
@@ -490,8 +465,12 @@ struct TrackedWindowState: Equatable {
 
     // MARK: MRU
 
+    /// The window at the front of the MRU, i.e. the one the model currently calls "where the user is".
+    var mruFrontWid: CGWindowID? { windows.first { $0.lastFocusOrder == 0 }?.wid }
+
     /// Record that the OS brought `wid` forward at time `at`, then re-derive the ranks. Usually `at` is the
     /// newest time in the model and the window lands at the front, exactly as the old front-and-shift did.
+    ///
     /// What differs is LATE news: a signal we could only apply after the fact slots in behind whatever the OS
     /// focused in the meantime, instead of jumping to the front (wrong — it steals a front the user has
     /// already left) or landing at the back (wrong — #5785's WeChat window, discovered 80ms late, went last).
@@ -548,6 +527,14 @@ struct TrackedWindowState: Equatable {
     /// Windows the query cannot see keep their existing relative order behind the stacked ones: not being on
     /// screen says nothing about which of them the user touched last.
     mutating func seedFocusOrderFromZOrder(_ widsTopFirst: [CGWindowID]) -> [CGWindowID] {
+        // **Diffed against the order from BEFORE the seed wrote, not against what the re-derivation moved.**
+        // The seed's own write lands in `lastFocusOrder` first, so on a cold model — every `focusedAt` still
+        // 0, which is exactly the launch case this runs in — `recomputeFocusRanks` re-derives, finds its
+        // answer already in place and reports nothing changed. The order really had changed; the reducer
+        // just emitted no log and no `.refreshUi` for it, leaving an open switcher drawing the old list.
+        // Live evidence: G-14 in the 2026-08-25 QA run moved the MRU front onto a Finder window with no
+        // `zOrder seed reordered` line anywhere in its debug log.
+        let before = windows.map { $0.lastFocusOrder }
         var zOrder = [CGWindowID: Int]()
         for (i, wid) in widsTopFirst.enumerated() { zOrder[wid] = i }
         func stacking(_ i: Int) -> Int { windows[i].wid.flatMap { zOrder[$0] } ?? Int.max }
@@ -556,7 +543,10 @@ struct TrackedWindowState: Equatable {
                 : windows[i].lastFocusOrder < windows[j].lastFocusOrder
         }
         for (i, index) in ordered.enumerated() { windows[index].lastFocusOrder = i }
-        return recomputeFocusRanks()
+        _ = recomputeFocusRanks()
+        return windows.indices
+            .filter { before[$0] != windows[$0].lastFocusOrder }
+            .compactMap { windows[$0].wid }
     }
 
     /// The log fact every MRU bump emits, read before bumping.
@@ -688,17 +678,6 @@ struct WsWindowSnapshot: Equatable {
 /// discovery / WS state / the Spaces re-query / an AX liveness probe), or a timer check firing. Each case
 /// carries exactly the OS-reported payload plus the ambient facts the live handler read at that instant
 /// (uptime, app-active, in-Space-transition) — so a recorded debug log can be transcribed input by input.
-/// Which gesture is about to make the OS put the desktop back. They differ only in how far ahead of the
-/// burst they arrive, which is what `WindowEventReducer.systemReshowMute` reads them for.
-enum ReshowSource: Equatable {
-    /// Mission Control / App Exposé / Show Desktop opening (`DockEvents`).
-    case missionControl
-    /// A display added, removed or resized (`ScreensEvents`).
-    case screens
-    /// The display waking or the session unlocking (`SleepWakeEvents` / `ScreenLockEvents`).
-    case wake
-}
-
 enum ReducerInput: Equatable {
     // WindowServer events (raw ids in `WsEventRouting.Notification`)
     case windowCreated(wid: CGWindowID, now: TimeInterval, inSpaceTransition: Bool)          // 811
@@ -714,10 +693,6 @@ enum ReducerInput: Equatable {
     /// NSWorkspace didActivateApplication (no WS equivalent). `altTabTargetWid` = a fresh AltTab-initiated
     /// focus of this app, when known.
     case appActivated(pid: pid_t, now: TimeInterval, altTabTargetWid: CGWindowID?)
-    /// The OS is about to put the whole desktop back, and which gesture it was — because they announce
-    /// themselves at very different distances from the burst they predict, and the mute should be no longer
-    /// than its own trigger needs (`WindowEventReducer.systemReshowMute`).
-    case systemReshow(now: TimeInterval, source: ReshowSource)
 
     // async read results landing
     /// The apply-side of `Applications.addDiscoveredWindow`: acquisition + discrimination ran in the shell;
@@ -763,14 +738,14 @@ enum ReducerInput: Equatable {
     /// frontmost (`Window.checkIfFocused`). The two differ only in their gate.
     case axFocusedWindowRead(wid: CGWindowID, viaActivationBackstop: Bool)
     /// AltTab focused a window of the app that is ALREADY frontmost, so no activation is coming to carry the
-    /// target (`WindowServerEvents.noteAltTabInitiatedFocus`). Recorded only so the focus burst can tell the
-    /// user's own switch from an app raising its windows; see `TrackedWindowState.Carried.altTabSameAppFocus`.
+    /// target (`WindowServerEvents.noteAltTabInitiatedFocus`). A namer like any other: it says which window
+    /// the user asked for, and `AttentionDriver` decides what that is worth.
     case altTabFocusedWindowInFrontmostApp(wid: CGWindowID, pid: pid_t, now: TimeInterval)
-    /// The app's own `kAXFocusedWindow`, read once a focus burst went quiet (`.resolveFocusAfterBurst`).
-    /// `focusedWid` is nil when the read failed; the burst is closed either way. `runStartedAt` NAMES the run
-    /// being answered (`FocusBurst.firstAt`) — see the effect for why an answer without it lands on the
-    /// wrong run.
-    case focusBurstResolved(pid: pid_t, runStartedAt: TimeInterval, focusedWid: CGWindowID?)
+    /// The bounded `kAXFocusedWindow` read an activation asked for came back with nothing — the app is wedged,
+    /// or genuinely has no focused window (`WindowServerEvents.bumpFocusOnActivation`). Reported rather than
+    /// dropped: unknown is a value, so the model records the silence instead of leaving the read outstanding
+    /// and dating every later answer from it.
+    case axFocusedWindowReadFailed(pid: pid_t)
     /// The AX probes after an order-out agreed the window is gone: dead cached element AND the app no longer
     /// lists the wid (`Applications.removeIfClosedAfterOrderOut`).
     case livenessConfirmedDead(wid: CGWindowID)
@@ -780,6 +755,16 @@ enum ReducerInput: Equatable {
     /// Screen stacking, top-most first, from the blocking CGS query the very first summon fires off-main
     /// (`Windows.sortByLevel`). The order to fall back on for windows AltTab has never seen focused.
     case zOrderRead(widsTopFirst: [CGWindowID])
+
+    /// **The attention reducer committed a decision.** The only input that may move the order: a click or
+    /// Cmd+` naming its target, AltTab's own switch, or an app answering which of
+    /// its windows it considers focused. Physical events reach the model through their own cases and change
+    /// visibility, geometry, membership and Space — never this.
+    /// `wid` is where attention lands — the tile the user ends up on. `observed` is the window the provider
+    /// actually named, which differs when that window is a background TAB: the driver maps a tab to the
+    /// tile that stands for it, and the fact that the app named a different member is precisely the tab
+    /// switch. Carrying both lets the representative move to the named tab before the order does.
+    case attentionCommitted(wid: CGWindowID, observed: CGWindowID, at: TimeInterval)
 
     // timer checks firing
     case holdReleaseCheck(wid: CGWindowID, attempt: Int)                                     // `checkHoldRelease`
@@ -841,17 +826,6 @@ enum ReducerEffect: Equatable {
     /// an activation emitted no 808 — read the front app's focused window from AX and bump it
     /// (`WindowServerEvents.bumpFocusOnActivation`, the weak-signal backstop)
     case bumpFocusViaAxBackstop(pid: pid_t)
-    /// A same-app 808 run with no activation behind it left the MRU unjudged: once the run goes quiet, ask
-    /// the app itself which of its windows has keys (`kAXFocusedWindow`) and feed the answer back as
-    /// `.focusBurstResolved`. Debounced per pid by the shell — every new member of the run re-arms it.
-    ///
-    /// `runStartedAt` is the run's identity (`FocusBurst.firstAt`), carried out and back so a LATE answer
-    /// cannot be applied to a later run. The read is asynchronous and `AXCallScheduler` holds a second call
-    /// for the same key until the first finishes, so a slow app (an unresponsive Electron one, or any app
-    /// once the scheduler backs off) really can have run N's answer arrive after run N+1 has opened. Without
-    /// this it would close that run, and run N+1's own answer would then find nothing to apply — leaving its
-    /// held focus events dropped for good, which is the #5596 / #5785 / #5875 symptom exactly.
-    case resolveFocusAfterBurst(pid: pid_t, runStartedAt: TimeInterval)
     /// re-check shortcut disabling for the frontmost app's focused window (after a Space change settles)
     case checkShortcutsForFocusedWindow
     /// One fact about what this input decided. The shell JOINS every one an input produced into a single

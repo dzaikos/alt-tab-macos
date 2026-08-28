@@ -273,6 +273,11 @@ coarser layer.
   backgrounding INSIDE window B is not adoptable by a same-size unrelated window (a live group — one whose
   own member still holds a Space — is never orphaned; `isOrphanedTab`).
 - **testWindowLinkedOnlyToItselfConfirmsNoTabCluster** — rec8's seed: a self-only link confirms no cluster.
+- **testASwitchingWindowIsNotFoldedIntoTheNeighbourItOutranksInMru** — live 2026-08-02: a tab switch in the
+  FRONT Finder window let the OTHER Finder window's cluster claim it, so a tile stopped being drawn and the
+  summon 15ms later offered four tiles instead of five. MRU is what refuses the fold — a group's active tab
+  is its most recently focused member by definition, so a window that outranks the candidate representative
+  cannot be one of its background tabs. The neighbour's own group must still form.
 - **testCascadedWindowTabsAreNotClaimedAcrossWindows** / **testGeometryDoesNotClusterCascadedWindowsOfTheSameApp**
   — rec11/rec12: the 29px cascade collision, closed on BOTH claim paths (titles: exact-position match;
   geometry: `framePartitions`).

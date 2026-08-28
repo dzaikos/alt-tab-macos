@@ -156,7 +156,7 @@ final class TestReducerRunner {
         case .deferCaptureUntilRestoreEnds(let wid):
             deferredCaptures.append(wid)
         case .copyThumbnail, .applyFocus, .updateScreenId, .removeWindowlessPlaceholder,
-             .addWindowlessPlaceholder, .bumpFocusViaAxBackstop, .resolveFocusAfterBurst,
+             .addWindowlessPlaceholder, .bumpFocusViaAxBackstop,
              .checkShortcutsForFocusedWindow:
             break  // display/AppKit-side; no model content beyond what the reducer already wrote
         }

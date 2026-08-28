@@ -2,6 +2,17 @@
 
 > **Line coverage:** `WindowFilterResolver.swift` 100% · _refreshed 2026-05-27 by `/coverage-explore`_
 
+## What backs the window (`axStatus`)
+
+- a window Accessibility verified is shown, as every window discovered the ordinary way is
+- a window kept on WindowServer evidence alone is tracked but NOT shown: nothing has vouched for it
+- a window Accessibility refused is never shown
+- a window the user was demonstrably directed to (a click named its wid, or AltTab focused it) IS shown,
+  even though Accessibility never answered — the app may be hung, and the user still went there
+- this gate runs before every other filter: a window that may not be claimed at all cannot be claimed by a
+  preference either
+
+
 ## Summary
 
 `WindowFilterResolver.shouldShow` decides whether a single window appears in the switcher for the
