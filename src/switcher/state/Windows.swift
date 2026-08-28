@@ -538,7 +538,7 @@ class Windows {
         }
     }
 
-    static func findOrCreate(_ windowAxUiElement: AXUIElement, _ wid: CGWindowID, _ app: Application, _ level: CGWindowLevel, _ title: String?, _ subrole: String?, _ role: String?, _ size: CGSize?, _ position: CGPoint?, _ isFullscreen: Bool?, _ isMinimized: Bool?) -> (Window?, Bool) {
+    static func findOrCreate(_ windowAxUiElement: AXUIElement, _ wid: CGWindowID, _ app: Application, _ level: CGWindowLevel, _ title: String?, _ subrole: String?, _ role: String?, _ size: CGSize?, _ position: CGPoint?, _ isFullscreen: Bool?, _ isMinimized: Bool?, _ isMain: Bool?) -> (Window?, Bool) {
         if let window = byWindowId[wid] ?? (list.first { $0.isEqualRobust(windowAxUiElement, wid) }) {
             // Adopt the freshest element for this wid. Some apps (e.g. Zoom meeting windows) silently rebuild a
             // window's accessibility element while keeping the same CGWindowID, with no destroyed notification,
@@ -554,7 +554,7 @@ class Windows {
             window.updateFromAxAttributes(title, size, position, isFullscreen, isMinimized)
             return (window, false)
         }
-        guard WindowDiscriminator.isActualWindow(app, wid, level, title, subrole, role, size) else { return (nil, false) }
+        guard WindowDiscriminator.isActualWindow(app, wid, level, title, subrole, role, size, isMain) else { return (nil, false) }
         let window = Window(windowAxUiElement, app, wid, title, isFullscreen, isMinimized, position, size)
         appendWindow(window)
         return (window, true)

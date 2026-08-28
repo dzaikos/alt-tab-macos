@@ -241,7 +241,7 @@ class Applications {
                     // pending-removal consume, the MRU promotion, the Space override for background tabs, the
                     // tab-state update, the reconcile — is the reducer's `.discoveryLanded` branch. A REJECTED
                     // window still dispatches, so the reducer's pending-removal marker stays self-draining.
-                    let findOrCreate = Windows.findOrCreate(element, wid, app, CGWindowLevel(raw.level), a.title, a.subrole, a.role, raw.bounds.size, raw.bounds.origin, isFullscreen, isMinimized)
+                    let findOrCreate = Windows.findOrCreate(element, wid, app, CGWindowLevel(raw.level), a.title, a.subrole, a.role, raw.bounds.size, raw.bounds.origin, isFullscreen, isMinimized, a.isMain)
                     // not logged here: the reducer's `.discoveryLanded` line names this window with the facts
                     // that actually matter (tab titles, group, Spaces, whether it was adopted as a tab)
                     findOrCreate.0?.isMainWindow = a.isMain ?? false
