@@ -11,7 +11,7 @@ The brute-force scan (`bruteForceElements`) walks remote-token AXUIElementIDs an
 window's id for a window's DESCENDANTS too — every button, outline, tab bar, and menu of window W also
 answers "W". Those descendants routinely sit at a LOWER AXUIElementID than the window element itself, so
 a scan that stopped at the first wid match returned a descendant (role `AXOutline` / `AXGroup` /
-`AXTabGroup` / `AXMenuButton`, subrole nil). `WindowDiscriminator` then rejected it for lacking a window
+`AXTabGroup` / `AXMenuButton`, subrole nil). `WindowAdmissionResolver` then rejected it for lacking a window
 subrole, and the window disappeared from the switcher entirely.
 
 That is the #5849 regression: the v11.4 WindowServer migration dropped the old fallback's subrole filter,
@@ -26,7 +26,7 @@ element `AXWindow`, but preceded in the scan by an `AXOutline` sharing its wid) 
 1. **Owns the target wid** — `candidateWid == targetWid`.
 2. **Is the window ROOT** — `candidateRole == kAXWindowRole` ("AXWindow").
 
-Gate on ROLE, not subrole. A real window's subrole is judged downstream by `WindowDiscriminator`
+Gate on ROLE, not subrole. A real window's subrole is judged downstream by `WindowAdmissionResolver`
 (`AXStandardWindow` OR `AXDialog`, plus app-specific carve-outs), and filtering by standard subrole here
 would drop apps with nonstandard trees. Role `AXWindow` is the narrowest gate that still lets the scan
 skip descendants and land on the root.
@@ -56,7 +56,7 @@ not on screen either, so it looks exactly like one of ours.
 only reject what it knows about, and at launch this scan routinely runs before the app's second window has
 been tracked: the list is then empty, every candidate sits on top of nothing, and the tabs of a window we had
 not seen yet are adopted as the requester's. Two real windows end up in one tab group, the second hidden
-inside it and no longer offered (T-19, 2026-08-25: `requester=#52149@(80,600) others=[]`, then two tabs at
+inside it and no longer offered (live 2026-08-25: `requester=#52149@(80,600) others=[]`, then two tabs at
 (80,80) adopted). The WindowServer's on-screen list is complete from the first scan. Read `requester=`/
 `others=` in the scan log before believing this gate did anything.
 
@@ -98,6 +98,6 @@ Mirrors `BruteForceWindowMatchTests.swift` 1:1.
 - **testRejectsATabParkedOnAnotherWindowOfTheSameApp** — the captured failure: the scan run for the window at
   y=80 found a candidate sitting exactly on the window at y=600 → false.
 - **testAdoptsAMergedTabAtItsOwnFrozenCascadePosition** — Merge All Windows leaves absorbed tabs at their own
-  frozen frames, on top of nothing → true (T-03/T-04 would go red otherwise).
+  frozen frames, on top of nothing → true (the merged-group cases go red otherwise).
 - **testAdoptsATabWhoseSizeDriftedFromItsParent** — same origin, different size → true.
 - **testAdoptsWhenTheRequestersFrameIsUnknown** — no evidence to reject on → true.

@@ -63,6 +63,8 @@ final class SwitcherSession {
     /// summon (see `Windows.selectionInputs`). Newcomers only push the default pick along while the list is
     /// longer than this — one that merely took the tile of a window that left it moved nothing.
     var visibleWindowCountAtSummon: Int?
+    /// Keeps one-per-app tiles from changing identity while discovery, grouping and search settle.
+    var representativeByPid = [pid_t: String]()
     var searchQuery: String = ""
 
     /// Full-resolution frames for the Preview panel, fetched just-in-time for the selected window and

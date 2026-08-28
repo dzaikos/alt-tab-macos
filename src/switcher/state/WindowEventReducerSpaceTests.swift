@@ -38,8 +38,8 @@ final class WindowEventReducerSpaceTests: XCTestCase {
 
     /// The leading edge exists to make ONE cheap fact current before the summon that follows it. A repaint
     /// here is the trap: `refreshOpenUiAfterExternalEvent` is throttled at 200ms leading-edge, so repainting
-    /// the instant the Space flips spends that edge and the arriving Space's focus 808 — 14-67ms later,
-    /// measured — then waits out the tail (live: 19ms became 220ms). Exact equality, so re-adding any of it
+    /// the instant the Space flips spends that edge and the semantic focus answer that follows then waits
+    /// out the tail (live: 19ms became 220ms). Exact equality, so re-adding any of it
     /// fails here rather than in a QA run weeks later.
     func testSpaceTransitionStartedEmitsTheTopologyReadAlone() {
         var s = state()
@@ -143,7 +143,7 @@ final class WindowEventReducerSpaceTests: XCTestCase {
     /// agree that nothing changed — a model that took the START of a transition as its answer would be left
     /// filtering and sorting for a Space the user never reached, with no second event coming to correct it.
     ///
-    /// Only reachable live since the QA harness learned to synthesize a dock swipe (`spaces` SP-05); a
+    /// Only reachable live since the QA harness learned to synthesize a dock swipe; a
     /// commanded `SLSManagedDisplaySetCurrentSpace` always commits, so this shape could not be produced.
     func testATransitionThatNeverCommitsLeavesTheModelWhereItWas() {
         var s = state()
@@ -169,7 +169,7 @@ final class WindowEventReducerSpaceTests: XCTestCase {
     /// **Swipes faster than the animation.** Each one starts a transition while the last is still running, so
     /// the leading edges arrive back to back with no settle between them. The edge carries no per-transition
     /// state, so a second one must be exactly the first — anything accumulated here would be a leak that
-    /// grows with how fast the user swipes (`spaces` SP-06).
+    /// grows with how fast the user swipes.
     func testOverlappingTransitionsAreIdempotent() {
         var s = state()
         let first = WindowEventReducer.reduce(&s, .spaceTransitionStarted)

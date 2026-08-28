@@ -8,11 +8,12 @@ different places and are never compared with each other.
     focusedWindow[process]   <- that app's own answer, the click's wid, one bounded read
     the visible front        == focusedWindow[frontProcess]
 
-The measurement base is `~/git/alt-tab-experiments/global-focus-read/SCENARIOS.md`: twelve focus scenarios,
-four signal sources, one clock. Two results shape the whole design. Accessibility names the window in 9 of 12
-scenarios and is the earliest source in 7, so it is the primary rather than the fallback. The WindowServer is
-never the best source in any scenario where anything else speaks and has no exclusive scenario at all, so
-**there is no physical input to this reducer** — 808 and 815 are not part of attention.
+The measurement base is twelve focus scenarios recorded with all four signal sources on one clock.
+Including follow-up N, Accessibility names the window in 10 of 12 scenarios
+and is the earliest window-naming source in 8, so it is the primary rather than the fallback. The WindowServer
+is never the best source in any scenario where anything else speaks and has no exclusive scenario at all, so
+**no physical input can name attention** — 808 and 815 are not part of attention. A lifecycle invalidation
+may erase a cached answer when its window ceases to exist; it never names or moves the front.
 
 ## Levels
 
@@ -36,6 +37,8 @@ never the best source in any scenario where anything else speaks and has no excl
 - **one bounded read, one trigger** — activating a process with no fact at all emits `readFocusedWindow`, and
   that is the only thing that emits it. A plain activation names no window from any source when the app's
   focused window did not change; that is the one hole nothing else fills.
+- an AltTab activation already carries its target and therefore needs no read; an activation for a process
+  with a cached app answer also needs no read
 - **the app outranks the click** — not as a rule of its own, but because the app's answer arrives later and
   arrival is the sequence. The click is a prediction; the app's answer is the outcome.
 - a settle taking the LAST answer per process is correct with no extra rule, and lives in the impure caller
@@ -50,6 +53,8 @@ never the best source in any scenario where anything else speaks and has no excl
 - an event for a process generation that is not the live one is refused
 - a relaunched pid forgets the previous generation's fact and its claim on the front
 - a process exit forgets its fact and clears the front if it held it
+- a window invalidation forgets any fact whose observed or representative window was that wid, so a later
+  activation reads again instead of resurrecting a dead target
 
 ## Decisions
 
@@ -64,6 +69,7 @@ never the best source in any scenario where anything else speaks and has no excl
 - `testAnswerFromABackgroundAppRecordsAFactAndMovesNothing` — the two levels really are separate.
 - `testActivationWithNoFactAsksForOneBoundedRead` — the one hole, and the one trigger.
 - `testActivationWithAFactMovesTheFrontWithoutReading` — a known app costs no read.
+- `testInvalidatedWindowMakesTheNextActivationReadAgain` — a dead cached window is not resurrected.
 - `testClickCarriesBothLevels` — the click names the app and the window at once.
 - `testAnAppAnswerNeverChangesWhichAppIsInFront` — a fact is never a command.
 - `testTheAppCorrectsTheClickBecauseItArrivesLater` — the outcome beats the prediction, by arrival.

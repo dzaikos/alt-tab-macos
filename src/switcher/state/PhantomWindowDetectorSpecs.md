@@ -8,7 +8,7 @@ shouldn't offer it as a switch target. The pixel content may be absent, black, o
 symptom, not the definition. Producers: alpha=0 Outlook reminders (#5170/#5448), `orderOut:` /
 `show:false` Electron windows (Codex/Slack #5714, Joplin #5495, Sprig #5496), WeChat/Teams/DingTalk
 hidden windows (#5508). Extracted as a pure kernel from `Window` / `Applications` so the "is this a
-phantom?" decision is unit-testable without CGS/AX. Full investigation: `PhantomWindowDetection.swift`.
+phantom?" decision is unit-testable without CGS/AX.
 
 A phantom is read on **two orthogonal CGS axes**:
 

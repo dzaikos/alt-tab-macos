@@ -54,7 +54,7 @@ recorded, and a situation gets a small budget instead of exactly one shot.
   live: three attempts covered ids `0..<30000` (~9.7k per 250ms) and adopted nothing, while Finder's window
   elements sat at ~31000 — stopping just short, every time. A tab's window element is minted when the tab is,
   so an app's windows cluster in a narrow band and a window we already track names it; anchoring a margin
-  below found them in a single attempt (D-01/D-03/T-15 went green, D-01 from 34s to 16s).
+  below found them in a single attempt (the live cases went green, the slowest from 34s to 16s).
 - **testARetryResumesWhereTheLastSweepStopped** — the cursor from a fruitless attempt beats the anchor, so
   retries climb the id space instead of re-walking what already failed.
 - **testASuccessfulScanSpendsNoBudget** — a scan that adopted something made progress and the situation it

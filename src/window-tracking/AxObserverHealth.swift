@@ -158,8 +158,8 @@ struct AxObserverRetryPolicy: Equatable {
     let maximumRetryDelay: UInt64
     /// The FIRST sparse wait, doubling up to `sparseCooldown`. A flat 30s here meant an app that was wedged
     /// when AltTab started and then began answering again waited out a full cooldown before anyone asked it
-    /// anything, which for the user is half a minute of the switcher not offering windows that are on screen
-    /// (WL-12). The growth costs a handful of extra attempts in the first minute against an app that is
+    /// anything, which for the user is half a minute of the switcher not offering windows that are on
+    /// screen. The growth costs a handful of extra attempts in the first minute against an app that is
     /// permanently silent, and nothing at all after that.
     let initialSparseDelay: UInt64
     let sparseCooldown: UInt64

@@ -7,7 +7,7 @@ a deadline and a verdict out. `AttentionEngine` owns the timer and calls this.
 
 An app raising all of its windows answers once per window, 29ms apart (#5974, measured). Every answer is
 true and the user went nowhere — the app puts keys back where they started. Committing each one walked the
-app's whole set to the top of the MRU (QA A-10). Taking only the LAST answer per process is right for that
+app's whole set to the top of the MRU, seen live. Taking only the LAST answer per process is right for that
 case and for a genuine switch alike, so the rule is "wait until the app stops talking", and it needs nothing
 guessed in advance and taken back.
 
@@ -25,7 +25,7 @@ order** — no other rule looks at runs of events any more.
 
 `settle` is 60ms, a little over the measured 29ms spacing. Widening it delays every genuine switch by the
 same amount, against a 219ms floor for the fastest human action ever captured; raises spaced wider than it
-commit separately and #5974's shape returns (QA A-11 watches that in amber).
+commit separately and #5974's shape returns (live QA watches that in amber).
 
 ## Test scenarios
 

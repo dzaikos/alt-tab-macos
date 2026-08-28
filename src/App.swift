@@ -388,15 +388,7 @@ class App: AppCenterApplication {
 
     static func checkIfShortcutsShouldBeDisabled(_ activeWindow: Window?, _ activeApp: Application?) {
         let app = activeWindow?.application ?? activeApp!
-        // The `.whenFullscreen` rule must reflect whether the frontmost app is CURRENTLY showing a fullscreen
-        // window. Don't trust only the window the triggering event carried: it is often nil or stale (RDP's
-        // fullscreen session window can't be AX-acquired, so `focusedWindow` reads nil; an activation fires
-        // before geometry lands). Deriving `isFullscreen` from that alone let the many call sites disagree, so
-        // the toggle flapped and a re-check re-enabled the shortcut mid-fullscreen — AltTab then grabbed Cmd-Tab
-        // inside a fullscreen remote session (#5842, same class as #5228). Read it from the model instead: the
-        // app has a fullscreen window on the current Space. Any trigger now computes the same verdict.
-        let isFullscreen = activeWindow?.isFullscreen == true
-            || Windows.list.contains { $0.application.pid == app.pid && $0.isFullscreen && $0.spaceIds.contains(Spaces.currentSpaceId) }
+        let isFullscreen = attendedWindowIsFullscreen(app, activeWindow)
         let shortcutsShouldBeDisabled = ExceptionMatcher.disablesShortcuts(
             app.state,
             isFullscreen: isFullscreen,
@@ -405,6 +397,16 @@ class App: AppCenterApplication {
         if shortcutsShouldBeDisabled && SwitcherSession.isActive {
             hideUi()
         }
+    }
+
+    private static func attendedWindowIsFullscreen(_ app: Application, _ activeWindow: Window?) -> Bool {
+        ShortcutExceptionContextResolver.isFullscreen(AttentionEngine.currentUserContext, appPid: app.pid,
+            activeWindowIsFullscreen: activeWindow?.isFullscreen == true,
+            windows: Windows.list.compactMap {
+                guard let wid = $0.cgWindowId else { return nil }
+                return FullscreenWindowEvidence(pid: $0.application.pid, wid: wid,
+                    isFullscreen: $0.isFullscreen, isOnCurrentSpace: $0.spaceIds.contains(Spaces.currentSpaceId))
+            })
     }
 
     static func continueAppLaunchAfterPermissionsAreGranted() {

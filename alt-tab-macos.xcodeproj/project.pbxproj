@@ -80,6 +80,12 @@
 		5F117E40000000000000F002 /* WindowFilterResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F117E40000000000000F001 /* WindowFilterResolver.swift */; };
 		5F117E40000000000000F003 /* WindowFilterResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F117E40000000000000F001 /* WindowFilterResolver.swift */; };
 		5F117E40000000000000F102 /* WindowFilterResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F117E40000000000000F101 /* WindowFilterResolverTests.swift */; };
+		5A220000000000000000A002 /* WindowAdmissionResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A220000000000000000A001 /* WindowAdmissionResolver.swift */; };
+		5A220000000000000000A003 /* WindowAdmissionResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A220000000000000000A001 /* WindowAdmissionResolver.swift */; };
+		5A220000000000000000A102 /* WindowAdmissionResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A220000000000000000A101 /* WindowAdmissionResolverTests.swift */; };
+		5A220000000000000000B002 /* WindowSurfaceInventory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A220000000000000000B001 /* WindowSurfaceInventory.swift */; };
+		5A220000000000000000B003 /* WindowSurfaceInventory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A220000000000000000B001 /* WindowSurfaceInventory.swift */; };
+		5A220000000000000000B102 /* WindowSurfaceInventoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A220000000000000000B101 /* WindowSurfaceInventoryTests.swift */; };
 		5F117E41000000000000F002 /* PhantomWindowDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F117E41000000000000F001 /* PhantomWindowDetector.swift */; };
 		5F117E41000000000000F003 /* PhantomWindowDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F117E41000000000000F001 /* PhantomWindowDetector.swift */; };
 		5F117E41000000000000F102 /* PhantomWindowDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F117E41000000000000F101 /* PhantomWindowDetectorTests.swift */; };
@@ -127,7 +133,6 @@
 		5F0A63052F82D97C00AE4C38 /* RemoteLicenseClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F0A63002F82D97C00AE4C38 /* RemoteLicenseClient.swift */; };
 		5F0A63062F82D97C00AE4C39 /* ProBadgeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F0A63072F82D97C00AE4C3A /* ProBadgeView.swift */; };
 		5F0A63072F82D99200AE4C38 /* UpgradeTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F0A63062F82D99200AE4C38 /* UpgradeTab.swift */; };
-		5F17452E2F1A908D00128EF8 /* WindowDiscriminator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F17452D2F1A907800128EF8 /* WindowDiscriminator.swift */; };
 		5F1CE0010000000000000001 /* Clock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F1CE0000000000000000001 /* Clock.swift */; };
 		5F1CE0010000000000000002 /* Clock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F1CE0000000000000000001 /* Clock.swift */; };
 		5F1CE0010000000000000003 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F1CE0000000000000000002 /* Keychain.swift */; };
@@ -490,6 +495,10 @@
 		5E5EA12E0000000000000101 /* KeyRepeatTimerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyRepeatTimerTests.swift; sourceTree = "<group>"; };
 		5F117E40000000000000F001 /* WindowFilterResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowFilterResolver.swift; sourceTree = "<group>"; };
 		5F117E40000000000000F101 /* WindowFilterResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowFilterResolverTests.swift; sourceTree = "<group>"; };
+		5A220000000000000000A001 /* WindowAdmissionResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowAdmissionResolver.swift; sourceTree = "<group>"; };
+		5A220000000000000000A101 /* WindowAdmissionResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowAdmissionResolverTests.swift; sourceTree = "<group>"; };
+		5A220000000000000000B001 /* WindowSurfaceInventory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowSurfaceInventory.swift; sourceTree = "<group>"; };
+		5A220000000000000000B101 /* WindowSurfaceInventoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowSurfaceInventoryTests.swift; sourceTree = "<group>"; };
 		5F117E41000000000000F001 /* PhantomWindowDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhantomWindowDetector.swift; sourceTree = "<group>"; };
 		5F117E41000000000000F101 /* PhantomWindowDetectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhantomWindowDetectorTests.swift; sourceTree = "<group>"; };
 		5F5790DE7EC7000000000A01 /* PreferencesPersistenceProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesPersistenceProbe.swift; sourceTree = "<group>"; };
@@ -520,14 +529,11 @@
 		5F04852D2F09AC9700235D4A /* WindowCaptureEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowCaptureEvents.swift; sourceTree = "<group>"; };
 		5F05D0E62F31441A004A95F9 /* AGENTS.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = AGENTS.md; sourceTree = "<group>"; };
 		5F05D0E72F31441A004A95F9 /* CLAUDE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = CLAUDE.md; sourceTree = "<group>"; };
-		5F084EAF2EF15E6B00CD212A /* TabbedWindowDetection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabbedWindowDetection.swift; sourceTree = "<group>"; };
-		5F084EB02EF15E6B00CD212B /* PhantomWindowDetection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhantomWindowDetection.swift; sourceTree = "<group>"; };
 		5F0A63002F82D97C00AE4C38 /* RemoteLicenseClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteLicenseClient.swift; sourceTree = "<group>"; };
 		5F0A63012F82D97C00AE4C38 /* LicenseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LicenseManager.swift; sourceTree = "<group>"; };
 		5F0A63022F82D97C00AE4C38 /* LicenseState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LicenseState.swift; sourceTree = "<group>"; };
 		5F0A63062F82D99200AE4C38 /* UpgradeTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpgradeTab.swift; sourceTree = "<group>"; };
 		5F0A63072F82D97C00AE4C3A /* ProBadgeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProBadgeView.swift; sourceTree = "<group>"; };
-		5F17452D2F1A907800128EF8 /* WindowDiscriminator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowDiscriminator.swift; sourceTree = "<group>"; };
 		5F1CE0000000000000000001 /* Clock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Clock.swift; sourceTree = "<group>"; };
 		5F1CE0000000000000000002 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
 		5F1CE0000000000000000003 /* LicenseAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LicenseAPI.swift; sourceTree = "<group>"; };
@@ -594,7 +600,6 @@
 		AECF000000000000000000B1 /* Secrets.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = Secrets.swift; sourceTree = "<group>"; };
 		BB0000000000000000000001 /* TabGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabGroup.swift; sourceTree = "<group>"; };
 		BC07818D6FCBEFC756C64296 /* menubar-2.pdf */ = {isa = PBXFileReference; lastKnownFileType = image.pdf; path = "menubar-2.pdf"; sourceTree = "<group>"; };
-		BF0C8070A1BBA8B425C8EF34 /* IOKit.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = IOKit.swift; sourceTree = "<group>"; };
 		BF0C80CD087C6384E0340F4E /* convert_font_to_png.sh */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.script.sh; path = convert_font_to_png.sh; sourceTree = "<group>"; };
 		BF0C80F8FAA00FF3D9682F26 /* DebugMenu.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = DebugMenu.swift; sourceTree = "<group>"; };
 		BF0C810FA0F6BC70E5886E11 /* HelperExtensionsTestable.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = HelperExtensionsTestable.swift; sourceTree = "<group>"; };
@@ -644,7 +649,6 @@
 		BF0C8A1E7D3F94B6E8C52A01 /* Throttler.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = Throttler.swift; sourceTree = "<group>"; };
 		BF0C8A261AAA42191426A587 /* run_tests.sh */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.script.sh; path = run_tests.sh; sourceTree = "<group>"; };
 		BF0C8A479D2B7FB80531F037 /* PopupButtonLikeSystemSettings.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PopupButtonLikeSystemSettings.swift; sourceTree = "<group>"; };
-		BF0C8B25934F02B9AC8B2B84 /* PrivateApis.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PrivateApis.swift; sourceTree = "<group>"; };
 		BF0C8B2C057099EDABE46779 /* Button.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = Button.swift; sourceTree = "<group>"; };
 		BF0C8B2C6D4E8FA012345678 /* SleepWakeEvents.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SleepWakeEvents.swift; sourceTree = "<group>"; };
 		BF0C8D4E8F60A1B234567890 /* ScreenLockEvents.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ScreenLockEvents.swift; sourceTree = "<group>"; };
@@ -669,7 +673,6 @@
 		BF0C8DF400A1AF64EB0CD0B3 /* TrafficLightButton.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = TrafficLightButton.swift; sourceTree = "<group>"; };
 		BF0C8E63BE7394A6591E74E0 /* LightImageView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LightImageView.swift; sourceTree = "<group>"; };
 		BF0C8E64BE7394A6591E74E1 /* LightImageLayer.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LightImageLayer.swift; sourceTree = "<group>"; };
-		BF0C8EAF02309B9C489E65F4 /* README.md */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		BF0C8EE17F3ABD7A6D44BFFE /* pl */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = pl; path = Localizable.strings; sourceTree = "<group>"; };
 		BF0C8F58B38F29B2662E6C2D /* PreferencesMigrations.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PreferencesMigrations.swift; sourceTree = "<group>"; };
 		5FCEFA110000000000000020 /* PreferencesMigrationsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesMigrationsTests.swift; sourceTree = "<group>"; };
@@ -990,6 +993,8 @@
 				5C5A1100000000000000B101 /* WsWindowStateTests.swift */,
 				5C5A1100000000000000C001 /* WindowAcquisitionPolicy.swift */,
 				5C5A1100000000000000D001 /* WindowServerQuery.swift */,
+				5A220000000000000000B001 /* WindowSurfaceInventory.swift */,
+				5A220000000000000000B101 /* WindowSurfaceInventoryTests.swift */,
 				5C5A1100000000000000F001 /* WindowElementAcquisition.swift */,
 			);
 			path = windowserver;
@@ -1102,7 +1107,8 @@
 				5EAA25B2000000000000A001 /* TestInteractionModel.swift */,
 				5EAA25B1000000000000A001 /* TestScenarioSimulatorTests.swift */,
 				BB0000000000000000000001 /* TabGroup.swift */,
-				5F17452D2F1A907800128EF8 /* WindowDiscriminator.swift */,
+				5A220000000000000000A001 /* WindowAdmissionResolver.swift */,
+				5A220000000000000000A101 /* WindowAdmissionResolverTests.swift */,
 				5F791E4A2F1C65E100B6419C /* ApplicationDiscriminator.swift */,
 				5F906A332F16A18000B99924 /* Screens.swift */,
 				D04BA7CF9C2D1BEC7C05AB24 /* Spaces.swift */,
@@ -1150,18 +1156,6 @@
 				BC07818D6FCBEFC756C64296 /* menubar-2.pdf */,
 			);
 			path = menubar;
-			sourceTree = "<group>";
-		};
-		BF0C827B752F58F79EDB6B6C /* experimentations */ = {
-			isa = PBXGroup;
-			children = (
-				5F084EAF2EF15E6B00CD212A /* TabbedWindowDetection.swift */,
-				5F084EB02EF15E6B00CD212B /* PhantomWindowDetection.swift */,
-				BF0C8070A1BBA8B425C8EF34 /* IOKit.swift */,
-				BF0C8EAF02309B9C489E65F4 /* README.md */,
-				BF0C8B25934F02B9AC8B2B84 /* PrivateApis.swift */,
-			);
-			path = experimentations;
 			sourceTree = "<group>";
 		};
 		BF0C84D1311C50D757DC5C2C /* l10n */ = {
@@ -1554,7 +1548,6 @@
 				CC00000000000000000C0003 /* macos */,
 				D04BA2CBF267F267225CA671 /* kit */,
 				D04BA0D80B24E72B9B981A1D /* debug */,
-				BF0C827B752F58F79EDB6B6C /* experimentations */,
 				D04BAAB92261FC04854FDDE9 /* App.swift */,
 				AECF000000000000000000A0 /* api */,
 				CC00000000000000000C0001 /* pro */,
@@ -2093,6 +2086,10 @@
 				5E5EA12E0000000000000102 /* KeyRepeatTimerTests.swift in Sources */,
 				5F117E40000000000000F003 /* WindowFilterResolver.swift in Sources */,
 				5F117E40000000000000F102 /* WindowFilterResolverTests.swift in Sources */,
+				5A220000000000000000A003 /* WindowAdmissionResolver.swift in Sources */,
+				5A220000000000000000A102 /* WindowAdmissionResolverTests.swift in Sources */,
+				5A220000000000000000B003 /* WindowSurfaceInventory.swift in Sources */,
+				5A220000000000000000B102 /* WindowSurfaceInventoryTests.swift in Sources */,
 				5F117E41000000000000F003 /* PhantomWindowDetector.swift in Sources */,
 				5F117E41000000000000F102 /* PhantomWindowDetectorTests.swift in Sources */,
 				5F5790DE7EC7000000000A03 /* PreferencesPersistenceProbe.swift in Sources */,
@@ -2182,6 +2179,8 @@
 				5F5849A900000000000000A2 /* BruteForceWindowMatch.swift in Sources */,
 				5E5EA12E0000000000000002 /* KeyRepeatTimerTestable.swift in Sources */,
 				5F117E40000000000000F002 /* WindowFilterResolver.swift in Sources */,
+				5A220000000000000000A002 /* WindowAdmissionResolver.swift in Sources */,
+				5A220000000000000000B002 /* WindowSurfaceInventory.swift in Sources */,
 				5F117E41000000000000F002 /* PhantomWindowDetector.swift in Sources */,
 				5F5790DE7EC7000000000A02 /* PreferencesPersistenceProbe.swift in Sources */,
 				5F5790DE7EC7000000000B02 /* PreferencesPersistenceCheck.swift in Sources */,
@@ -2227,7 +2226,6 @@
 				D04BAABE804F3769CE22BEB6 /* HyperlinkLabel.swift in Sources */,
 				5F7B6AFC2F3BAB98003E25E8 /* StatusIconsView.swift in Sources */,
 				D04BAD2A7F2E8BF64EE982E9 /* TextArea.swift in Sources */,
-				5F17452E2F1A908D00128EF8 /* WindowDiscriminator.swift in Sources */,
 				D04BA11E56383D082D7BE5A5 /* TilesView.swift in Sources */,
 				5EA8E110000000000000DA02 /* DragAndDropResolver.swift in Sources */,
 				D04BAFC1A1B2C3D4E5F60002 /* TileOverView.swift in Sources */,

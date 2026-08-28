@@ -43,7 +43,7 @@ private func logKeyboardEvent(_ globalId: Int?, _ shortcutState: ShortcutState?,
 /// event to arrive is usually the next summon's key-down. Settle that stale session against the tile the
 /// user was looking at BEFORE this event's action can move it: settled after, `nextWindowShortcut` has
 /// already cycled, so the release commits one tile past what was asked and every alt-tab from then on
-/// ping-pongs against a window the user never picked (QA F-01). Run again after the loop, for a session this
+/// ping-pongs against a window the user never picked, seen live. Run again after the loop, for a session this
 /// very event opened with the modifier already back up.
 private func settleLostHoldRelease() {
     guard let session = SwitcherSession.current else { return }

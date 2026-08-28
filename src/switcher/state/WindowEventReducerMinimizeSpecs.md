@@ -42,9 +42,9 @@ why this went unreported for so long.
 
 **The restore took no front.** When its app was already frontmost the restore emits ONLY the 815 — the same
 shape as Cmd+` — and `cameBackOnScreen` swallows the bump. That guard exists for Space re-shows (#5849) and
-cannot tell a Dock restore from one. When the app was NOT frontmost the restore activates it and
-`appActivated` → `axFocusedWindowRead` fronts the window a beat later, which is why the bug only bites on a
-same-app restore.
+cannot tell a Dock restore from one. When the app was NOT frontmost the restore activates it and the
+attention model uses the app's cached focused-window fact, or requests one bounded read if no fact exists.
+That fronts the window a beat later, which is why the bug only bites on a same-app restore.
 
 **And the panel may be OPEN while all this happens** (reported 2026-08-06). Minimizing from the switcher's
 "m" shortcut does not close it, so the un-minimize that follows lands on a tile the user is looking at, and
@@ -81,7 +81,7 @@ Mirrors `WindowEventReducerMinimizeTests.swift` 1:1.
 - **testRestoringFromTheDockClearsTheFlag** — the reporter's own steps: after the restore the window is no
   longer minimized. Without the fix it ends `isMinimized=true`, which with `showMinimizedWindows ==
   .showAtTheEnd` renders it at the very back of the list. The ORDER is not asserted: the restored window
-  reaches the front when its app says it has focus, not because it was ordered in (live: I-15/I-16).
+  reaches the front when its app says it has focus, not because it was ordered in (seen live).
 - **testTheOrderInAloneClearsTheMinimizedFlag** — no follow-up read is replayed, because on this path none
   of them is prompt (AX ~530ms, the WindowServer tag ~644ms). The flag must clear from the event alone, and
   say so in the log.
@@ -118,7 +118,7 @@ Mirrors `WindowEventReducerMinimizeTests.swift` 1:1.
 ## What no unit test can cover
 
 That the live Dock path emits the 815 at all, and that every queryable source lags it. Both are OS facts;
-they were established by measurement (above) and are re-checked by QA I-15 / I-16, not here.
+they were established by measurement (above) and are re-checked by live QA, not here.
 
 ### E. The on-screen bit that tab-grouping reads (#5954)
 

@@ -30,8 +30,8 @@ The reaction is therefore split by cost, and the split is what these tests hold 
 
 **The trap the first test guards.** The leading edge must NOT repaint. `App.refreshOpenUiAfterExternalEvent`
 is throttled at 200ms leading-edge, so a repaint fired the instant the Space flips SPENDS that edge, and the
-update that actually matters — the arriving Space's focus 808, which lands 14–67ms later and re-orders the
-tiles — then waits out the tail. Measured live with the switcher open across a transition: it pushed the MRU
+update that actually matters — the semantic focus answer following the Space change — then waits out the
+tail. Measured live with the switcher open across a transition: it pushed the MRU
 correction from 19ms to 220ms after the summon. It looks free and it is not.
 
 ## Scenarios
@@ -104,4 +104,4 @@ in between, so this is not a no-op at the event layer, only at the answer layer.
   to back with no settle between them. The edge holds no per-transition state, so the second is exactly the
   first.
 
-Live counterparts: `spaces` SP-05 (abandoned swipe) and SP-06 (three overlapping swipes) in `alt-tab-qa`.
+Both have live counterparts in the QA suite: an abandoned swipe, and three overlapping swipes.

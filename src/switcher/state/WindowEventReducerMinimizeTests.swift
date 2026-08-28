@@ -85,7 +85,7 @@ final class WindowEventReducerMinimizeTests: XCTestCase {
     ///
     /// The ORDER is deliberately not asserted: an 815 is not a statement about what the user is looking at,
     /// so the restored window reaches the front when its app says it has focus, not because it was ordered
-    /// in. Live coverage is I-15/I-16.
+    /// in. Covered live by QA.
     func testRestoringFromTheDockClearsTheFlag() {
         let runner = TestReducerRunner(initial: desktop())
         runner.run(dockRestoreSteps())
@@ -246,7 +246,7 @@ final class WindowEventReducerMinimizeTests: XCTestCase {
     func testDiscoverySeedsTheOnScreenBit() {
         var s = state([window(1, Self.chromePid, order: 0)], frontmost: Self.chromePid)
         _ = WindowEventReducer.reduce(&s, .discoveryLanded(wid: 1, accepted: true, newlyTracked: true,
-            adoptedAsInactiveTab: false, queriedSpaceIds: [1], isOrderedIn: true, tabTitles: nil))
+            adoptedAsInactiveTab: false, queriedSpaceIds: [1], isOrderedIn: true, tabTitles: nil, tabGroupToken: nil))
         XCTAssertTrue(s.windows[0].isOrderedIn)
     }
 
@@ -255,7 +255,7 @@ final class WindowEventReducerMinimizeTests: XCTestCase {
     func testAnAdoptedInactiveTabIsNeverSeededOnScreen() {
         var s = state([window(1, Self.chromePid, order: 0)], frontmost: Self.chromePid)
         _ = WindowEventReducer.reduce(&s, .discoveryLanded(wid: 1, accepted: true, newlyTracked: true,
-            adoptedAsInactiveTab: true, queriedSpaceIds: [1], isOrderedIn: true, tabTitles: nil))
+            adoptedAsInactiveTab: true, queriedSpaceIds: [1], isOrderedIn: true, tabTitles: nil, tabGroupToken: nil))
         XCTAssertFalse(s.windows[0].isOrderedIn)
     }
 

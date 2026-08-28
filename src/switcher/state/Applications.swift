@@ -127,10 +127,9 @@ class Applications {
         }
     }
 
-    /// Window discovery: take the all-Space wid set from the WindowServer and ACQUIRE an AX element for each
-    /// genuinely-new app-level window (via `WindowElementAcquisition`), then discriminate it with WS-owned
-    /// facts (geometry/level/fullscreen/minimized from the snapshot) + a light AX read (subrole/role/title/
-    /// tabs). Already-tracked windows are skipped — events keep their geometry live, reviewExistingWindows their title/tabs.
+    /// Window discovery inventories every WindowServer surface, then acquires AX semantics only for plausible
+    /// parentless destinations. Physical rows remain separate from tracked `Window`s, so unresolved native
+    /// tabs cannot block inactive-tab adoption.
     static func refreshWindowsViaWindowServer() {
         // the all-Space wid list comes from ONE CGSCopyWindowsWithOptionsAndTags call over every Space
         // (verified to match the per-Space fan-out), not a second windowToSpacesMap rebuild — syncSpacesState
@@ -143,8 +142,10 @@ class Applications {
             // that also ran on the AX pool): a wid CGS omits from "visible" but keeps in "all" is alive-but-hidden.
             let visibleWids = Set(CGSCallScheduler.windowsInSpaces(allSpaceIds, false))
             let allWids = Set(allSpaceWids)
-            let appWindows = WindowServerQuery.query(allSpaceWids).filter { WsWindowState.isApplicationWindowLevel($0) }
+            let rawWindows = WindowServerQuery.query(allSpaceWids)
             DispatchQueue.main.async {
+                WindowSurfaceInventory.replace(rawWindows)
+                Windows.reevaluatePhysicalEvidence(rawWindows)
                 // Drain the confirmed-closed tombstones against the two lists we just fetched, BEFORE they
                 // gate anything: a wid CGS lists as visible again is genuinely back (a reopened window is
                 // untagged, wherever its Space), and a wid CGS finally forgot is gone for good. What's left is
@@ -154,18 +155,13 @@ class Applications {
                 widsConfirmedClosed.formIntersection(allWids)
                 widsConfirmedClosed.subtract(visibleWids)
                 // Same reconcile for the opt-in dedup set: this enumeration is the only place that sees which
-                // wids still exist, and destroy events don't erase reliably. Before the loop below, so a
-                // pruned wid that IS still app-level is re-subscribed in this very pass.
+                // wids still exist, and destroy events don't erase reliably.
                 WindowServerEvents.pruneSubscriptions(allWids)
-                for raw in appWindows {
-                    // Opt in BEFORE the acquisition can reject it: subscribing costs nothing and commits to
-                    // nothing, and a wid we skip here is one whose later re-show we cannot hear (see
-                    // `WindowServerEvents.subscribe`).
+                for raw in rawWindows {
+                    let physical = PhysicalSurface(raw)
+                    guard WindowAdmissionResolver.shouldAcquireSemantics(physical) ||
+                            Windows.byWindowId[raw.wid]?.admissionEvidence == .attention else { continue }
                     WindowServerEvents.subscribe(raw.wid)
-                    // This enumeration is the authority on level, so it also clears a stale "not an
-                    // application window" verdict — the recovery path for a window re-leveled after creation,
-                    // or one whose destroy event never came before its number was reused.
-                    WindowServerEvents.noteApplicationLevel(raw.wid)
                     guard let app = findOrCreate(raw.pid, false) else { continue }
                     // tracked windows with a live element stay fresh via the WS event stream
                     // (geometry/min/fullscreen) + reviewExistingWindows (title/tabs); discovery only ACQUIRES
@@ -173,7 +169,8 @@ class Applications {
                     guard Windows.byWindowId[raw.wid]?.axUiElement == nil else { continue }
                     guard !widsConfirmedClosed.contains(raw.wid) else { continue }
                     AXCallScheduler.shared.schedule(key: "wid-\(raw.wid)-acquire", context: app.debugId, pid: raw.pid, scan: true) {
-                        guard let element = WindowDiscriminator.acquireElementOrReject(raw.wid, raw.pid, .otherSpaceViaBruteForce) else { return }
+                        guard let element = WindowElementAcquisition.element(for: raw.wid, pid: raw.pid,
+                            route: .otherSpaceViaBruteForce) else { return }
                         addDiscoveredWindow(element, raw, app)
                     }
                 }
@@ -189,9 +186,9 @@ class Applications {
         }
     }
 
-    /// Acquire-and-discriminate a newly-discovered window. WindowServer-owned facts (geometry, level,
+    /// Acquire and classify a newly-discovered surface. WindowServer-owned facts (geometry, level,
     /// fullscreen) come from the snapshot `raw`; AX is read for what WS can't give cleanly — subrole/role
-    /// (discrimination), title (AX title is preferred), the main flag, minimized (the WS ordered-out bit is
+    /// (admission), title (AX title is preferred), the main flag, minimized (the WS ordered-out bit is
     /// ambiguous — see below), and tab children.
     /// Used for genuinely-new windows only (discovery + discoverWindow). Uses the "generic" bucket so a real
     /// focus event (in the "focus" bucket) is never clobbered.
@@ -212,12 +209,12 @@ class Applications {
             // its own window, skip it; otherwise it can't be ours, so proceed.
             if let panel = TilesPanel.shared, wid == panel.windowNumber { return }
             let isSelf = app.pid == AXUIElement.currentProcessPid
-            // minimized comes from AX (kAXMinimized) — a reliable, unambiguous signal — NOT the WS ordered-out
-            // bit, which is also cleared for closing / app-hidden / other-Space windows. (yabai sources
-            // minimize from AX the same way: seed kAXMinimized, then track miniaturize/deminiaturize.)
+            // The WS minimized tag is distinct from the ordered-out bit, which is also cleared for closing,
+            // app-hidden and other-Space windows.
             let keys = [kAXTitleAttribute, kAXSubroleAttribute, kAXRoleAttribute, kAXMainAttribute] + (isSelf ? [] : [kAXChildrenAttribute])
             let a = try element.attributes(keys, pid: app.pid)
-            let tabSiblingTitles = isSelf ? nil : TabGroup.extractTabTitles(a.children)
+            let semantic = SemanticSurface(title: a.title, subrole: a.subrole, role: a.role, isMain: a.isMain)
+            let tabGroup = isSelf ? nil : TabGroup.extractTabGroup(a.children)
             let isFullscreen = WsWindowState.isFullscreen(raw)
             // Both from the SAME WindowServer snapshot this discovery already holds. Minimized used to be an
             // AX `kAXMinimized` read in the batch above; it is a WindowServer tag now, so it cannot be
@@ -239,16 +236,16 @@ class Applications {
                     // The shell's job ends at acquisition + raw-fact ingestion: findOrCreate applies the AX/WS
                     // attributes (and appends a genuinely-new window). Everything decided AFTER that — the
                     // pending-removal consume, the MRU promotion, the Space override for background tabs, the
-                    // tab-state update, the reconcile — is the reducer's `.discoveryLanded` branch. A REJECTED
-                    // window still dispatches, so the reducer's pending-removal marker stays self-draining.
-                    let findOrCreate = Windows.findOrCreate(element, wid, app, CGWindowLevel(raw.level), a.title, a.subrole, a.role, raw.bounds.size, raw.bounds.origin, isFullscreen, isMinimized, a.isMain)
+                    // tab-state update, the reconcile — is the reducer's `.discoveryLanded` branch. A surface
+                    // not admitted yet still dispatches, so the reducer's pending-removal marker stays self-draining.
+                    let findOrCreate = Windows.findOrCreate(element, raw, app, semantic, isFullscreen, isMinimized)
                     // not logged here: the reducer's `.discoveryLanded` line names this window with the facts
                     // that actually matter (tab titles, group, Spaces, whether it was adopted as a tab)
                     findOrCreate.0?.isMainWindow = a.isMain ?? false
                     TrackedWindowStateBridge.dispatch(.discoveryLanded(wid: wid, accepted: findOrCreate.0 != nil,
                         newlyTracked: findOrCreate.1, adoptedAsInactiveTab: adoptedAsInactiveTab,
                         queriedSpaceIds: spaceIds, isOrderedIn: WsWindowState.isVisible(raw),
-                        tabTitles: tabSiblingTitles))
+                        tabTitles: tabGroup?.titles, tabGroupToken: tabGroup?.token))
                     // A genuinely new window changes what the startup guess has to rank, so re-make it here
                     // rather than once on a timer that fires before discovery lands.
                     if findOrCreate.1 { Windows.reseedZOrderDuringStartup() }
@@ -279,6 +276,7 @@ class Applications {
                     isMinimized: WsWindowState.isMinimized($0))
             }
             DispatchQueue.main.async {
+                Windows.reevaluatePhysicalEvidence(raws)
                 TrackedWindowStateBridge.dispatch(.windowServerStateRead(snapshots))
             }
         }
@@ -332,21 +330,23 @@ class Applications {
         }
     }
 
-    /// A focus event (808) hit a wid we don't track yet — its create event was missed or is in-flight.
-    /// Discover just that one window (it's on the current Space, since it was focused) instead of a full
-    /// inventory. `Window.init`'s `checkIfFocused` then bumps its MRU order.
+    /// A physical event or exact attention signal named a wid we do not track yet. Discover just that one
+    /// window instead of a full inventory; `Window.init` seeds the app's per-process focus fact after append.
     static func discoverWindow(_ wid: CGWindowID) {
         CGSCallScheduler.run {
             guard let raw = WindowServerQuery.query([wid]).first else { return }
-            guard WindowDiscriminator.isApplicationWindow(raw) else {
-                // Menu, tooltip, Dock indicator. Remember the level verdict so this wid's next move / order-in
-                // costs nothing at all: no snapshot, no reducer pass, no repeat of this very query.
-                DispatchQueue.main.async { WindowServerEvents.noteNotApplicationLevel(wid) }
-                return
-            }
             DispatchQueue.main.async {
-                // Opt in HERE, not on the raw 811: the level is only known once the query above answers, and
-                // subscribing before it put every menu, tooltip and Dock indicator on our per-window stream.
+                WindowSurfaceInventory.upsert([raw])
+                if raw.parentWid != 0 {
+                    WindowServerEvents.subscribe(raw.parentWid)
+                    discoverWindow(raw.parentWid)
+                    return
+                }
+                guard WindowAdmissionResolver.shouldAcquireSemantics(PhysicalSurface(raw)) ||
+                        Windows.byWindowId[wid]?.admissionEvidence == .attention else { return }
+                // Opt in HERE, not on the raw 811: the physical acquisition verdict is only known once the
+                // query above answers, and subscribing before it put every menu, tooltip and Dock indicator
+                // on our per-window stream.
                 //
                 // The cost is a gap: this wid's per-window events are unheard between its create and this
                 // line. MEASURED on macOS 26.5, 25 rapid create/destroy cycles with the WindowServer driven
@@ -356,9 +356,9 @@ class Applications {
                 // distribution (p50 34ms), same 49 windows accepted. Nothing measurable is lost in the gap.
                 // Re-run that A/B before assuming it still holds on a new macOS.
                 //
-                // It is also survivable by construction: everything discovery reads next (geometry,
-                // minimized, fullscreen, Spaces, title) is read fresh right here, and the one signal that is
-                // NOT re-read, a focus 808, is compensated by `recentlyCreated` fronting a new window anyway.
+                // It is also survivable by construction: everything discovery needs is read fresh here, and
+                // exact attention arriving inside the gap waits for this wid to have a model object before it
+                // commits. The per-app discovery seed covers an already-front app at cold start.
                 // Deliberately before the guards below — a window AX rejects must stay subscribed (#5785).
                 WindowServerEvents.subscribe(wid)
                 // A window kept on WindowServer evidence alone must NOT block its own re-acquisition: it is
@@ -367,7 +367,8 @@ class Applications {
                 guard Windows.byWindowId[wid]?.axUiElement == nil,
                       let app = findOrCreate(raw.pid, false) else { return }
                 AXCallScheduler.shared.schedule(key: "wid-\(wid)-acquire", context: app.debugId, pid: raw.pid, scan: true) {
-                    guard let element = WindowDiscriminator.acquireElementOrReject(wid, raw.pid, .currentSpaceViaApplicationWindows) else { return }
+                    guard let element = WindowElementAcquisition.element(for: wid, pid: raw.pid,
+                        route: .currentSpaceViaApplicationWindows) else { return }
                     addDiscoveredWindow(element, raw, app)
                 }
             }
@@ -425,7 +426,7 @@ class Applications {
                 // routinely runs before the app's second window has been tracked: `others=[]` then waves
                 // everything through, and the tabs of a window we had not seen yet were adopted as the
                 // requester's. Two real windows ended up in ONE tab group, the second hidden inside it as a
-                // non-representative member and no longer offered at all (T-19, 2026-08-25 — the scan logged
+                // non-representative member and no longer offered at all (live 2026-08-25 — the scan logged
                 // `requester=#52149@(80,600) others=[]` and then adopted two tabs sitting at (80,80)).
                 // The WindowServer's on-screen list is complete from the first scan, and both sides of the
                 // comparison come from the same decoder, so the frames are in one coordinate space.
@@ -516,20 +517,23 @@ class Applications {
             // ordered-out window reports its AXTabGroup inconsistently mid-transition, and order-out never
             // changes tab membership anyway. Saves the kAXChildren IPC too.
             let readTabs = !isSelf && reconcileTabs
-            let keys = [kAXTitleAttribute, kAXMainAttribute] + (readTabs ? [kAXChildrenAttribute] : [])
+            let keys = [kAXTitleAttribute, kAXSubroleAttribute, kAXRoleAttribute, kAXMainAttribute] +
+                (readTabs ? [kAXChildrenAttribute] : [])
             let a = try axWindow.attributes(keys, pid: app.pid)
-            let tabSiblingTitles = readTabs ? TabGroup.extractTabTitles(a.children) : nil
+            let tabGroup = readTabs ? TabGroup.extractTabGroup(a.children) : nil
             DispatchQueue.main.async {
                 windowAttributesThrottler.throttleOrProceed(key: "\(wid)-generic") {
                     guard let window = Windows.byWindowId[wid] else { return }
                     // raw-fact ingestion stays here (bestEffortTitle needs the CG-title fallback IPC); the
                     // tab reconcile + re-render decision is the reducer's `.titleAndTabsRead` branch
                     let newTitle = window.bestEffortTitle(a.title)
+                    let semantic = SemanticSurface(title: newTitle, subrole: a.subrole, role: a.role, isMain: a.isMain)
+                    guard Windows.reevaluateAdmission(window, semantic) else { return }
                     let changed = window.title != newTitle
                     if changed { window.title = newTitle; window.lastSearchQuery = nil }
                     window.isMainWindow = a.isMain ?? false
-                    TrackedWindowStateBridge.dispatch(.titleAndTabsRead(wid: wid, tabTitles: tabSiblingTitles,
-                        reconcileTabs: reconcileTabs, changedSoFar: changed))
+                    TrackedWindowStateBridge.dispatch(.titleAndTabsRead(wid: wid, tabTitles: tabGroup?.titles,
+                        tabGroupToken: tabGroup?.token, reconcileTabs: reconcileTabs, changedSoFar: changed))
                 }
             }
         }
@@ -551,7 +555,7 @@ class Applications {
             window.title = newTitle
             window.lastSearchQuery = nil
             TrackedWindowStateBridge.dispatch(.titleAndTabsRead(wid: wid, tabTitles: nil,
-                reconcileTabs: false, changedSoFar: true))
+                tabGroupToken: nil, reconcileTabs: false, changedSoFar: true))
         }
     }
 
@@ -604,6 +608,7 @@ class Applications {
         }
         for tApp in terminatingApps {
             let pid = tApp.processIdentifier
+            WindowSurfaceInventory.remove(pid: pid)
             AxObserverRegistry.shared.processExited(pid, generation: AttentionEngine.generation(of: pid))
             AttentionEngine.processExited(pid)
             AXCallScheduler.shared.removeEntry(key: "pid-\(pid)")
@@ -654,15 +659,14 @@ class Applications {
     }
 
     @discardableResult
-    static func findOrCreate(_ pid: pid_t, _ needToVerifyFrontmostPid: Bool) -> Application? {
-        if let app = (list.first { $0.pid == pid }) {
-            return app
-        }
+    static func findOrCreate(_ pid: pid_t, _ needToVerifyFrontmostPid: Bool,
+                             evidence: ApplicationAdmissionEvidence = .discovery) -> Application? {
+        if let app = (list.first { $0.pid == pid }) { return app }
         guard let runningApp = NSRunningApplication(processIdentifier: pid) else {
             Logger.debug { "NSRunningApplication init failed for pid:\(pid)" }
             return nil
         }
-        guard ApplicationDiscriminator.isActualApplication(pid, runningApp.bundleIdentifier) else {
+        guard ApplicationDiscriminator.isActualApplication(pid, runningApp.bundleIdentifier, evidence: evidence) else {
             return nil
         }
         let app = Application(runningApp)

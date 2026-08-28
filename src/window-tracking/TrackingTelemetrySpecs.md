@@ -5,8 +5,7 @@ attention decisions that were committed and refused. It is written after decisio
 recorder that owns nothing — the deciding is `AttentionEngine`'s (`AttentionOrderSpecs.md`). Switching
 telemetry off cannot change what AltTab does.
 
-The QA harness is the consumer: `--qa-state` reads `summary`, and `--qa-telemetry` drains the ring as NDJSON
-(CF-08 and CF-09 assert on the `sessionTap` records).
+The QA harness is the consumer: `--qa-state` reads `summary`, and `--qa-telemetry` drains the ring as NDJSON.
 
 ## Record schema
 

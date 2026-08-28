@@ -179,6 +179,9 @@ question from the frontmost app's windows (#5960) · plus direct helper-kernel c
 - **testCurrentWindowIsDrawnIsFalseWhenAPlaceholderAccompaniesAFilteredOutWindow** — the real window still
   answers.
 - **testCurrentWindowIsDrawnIsTrueWhenTheAppHasNoWindows** — nothing tracked for the frontmost app.
+- **testExactAttentionAnswersForTheWindowRatherThanItsApplication** — when attention identifies the current
+  window, its own filter result decides even if a sibling from the same app remains drawn.
+- **testUnknownAttentionPreservesTheOrdinaryRule** — missing evidence never becomes evidence of absence.
 - **testInitialPickStepsOverTheFrontTileAfterTheFrontmostAppLostItsLastWindow** — #5960 through both kernels,
   on the reporter's own steps: the pick lands on the second tile, not the window already on screen.
 

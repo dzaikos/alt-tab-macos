@@ -96,14 +96,14 @@ the scenario layer drives it, and its per-step invariants police every scenario.
 
 ## What stayed in the shell, and why
 
-- **Acquisition + discrimination + attribute ingestion** (`WindowDiscriminator`, `findOrCreate`,
+- **Acquisition + admission + attribute ingestion** (`WindowAdmissionResolver`, `findOrCreate`,
   `bestEffortTitle`): AX/CGS IPC and object creation; the reducer takes over at `discoveryLanded`.
 - **Throttling/coalescing** (`windowAttributesThrottler` etc.): IO pacing, carried on effects as flags.
 - **`Windows.removeWindows`**: view/scheduler/subscription cleanup stays live; the reducer decides WHEN
   (`removeWindow` effect) and the harness twins the model part. The MRU-shift semantics exist twice
   (live + harness twin) — the one accepted duplication.
-- **Timers** (`armHoldReleaseCheck`/`armDragOutCheck`), the NSWorkspace observers, the AX backstop's
-  focused-window read, the Space-transition debounce, `Window.init`'s `checkIfFocused` seed, and the
+- **Timers** (`armHoldReleaseCheck`/`armDragOutCheck`), the NSWorkspace observers, the factless activation's
+  bounded focused-window read, the Space-transition debounce, `Window.init`'s `checkIfFocused` seed, and the
   full-rescan sweeps (`discardDeadPhantomWindows`) — pure IO or init-time seeding.
 
 ## Test scenarios
@@ -124,7 +124,7 @@ report a violation. These are tests OF the harness, not of the reducer.
   ejection).
 - **testHarnessFlagsARepresentativeThatIgnoresFocus** — a representative that is not the most recently
   focused presentable member (the rec19 churn shape).
-- **testLeavingAGroupKeepsTheLentSpaceSoALiveWindowIsNotHidden** — QA T-05: the exact-set re-form ungroups
+- **testLeavingAGroupKeepsTheLentSpaceSoALiveWindowIsNotHidden** — seen live: the exact-set re-form ungroups
   the torn-out window; it keeps the Space the group lent it (marker still set) instead of being asserted
   Space-less, which had hidden a live window for 515ms.
 - **testHarnessSpacelessStrayIsHiddenAndHeldIsExempt** — a Space-less, ungrouped, unheld window must be
@@ -176,6 +176,16 @@ the bookkeeping it still owns: an untracked wid it names, and the sequences a re
   promotion: an untracked order-in counts only for the app that was frontmost when the window appeared, and
   the pid can only be checked once discovery names it.
 
+### C2. The group token, and what it retires
+
+- **testTabsJoinOneGroupByTokenWhenTitlesAndFramesNameNobody** — two tabs whose AX titles name nobody (#5785's
+  composed titles) and whose frames share no cluster (a tab bar resized one) still end up in ONE group,
+  because each named the same `AXTabGroup` element while it was the selected tab. The point of the fixture is
+  what it does NOT contain: no create, no pairing window, no clock — the second read lands whenever it lands
+  and the group is still exact. This is the signal `recentPairingWindow` reconstructs by arrival time; the
+  timer stays for what the token cannot see (a fullscreen group in Terminal / TextEdit exposes no element,
+  and a tab nobody has ever selected has no token), so the two are layered, not swapped.
+
 ### D. The handover edge (`recordHandover`)
 
 The kernel guards reading `replacedByWid` / `replacedWid` are decoration unless the edge is actually written
@@ -216,14 +226,14 @@ has to be reported accurately.
 - **testZOrderNeverDemotesAWindowThatWasActuallyFocused** — a window the OS told us was focused keeps its
   place, because the seed is written into the `focusedAt` TIEBREAK rather than over it. Teeth-verified:
   assign the ranks directly, as `Windows.sortByLevel` used to, and this fails with the live symptom — the
-  T-21 capture where the just-focused Terminal tab, backgrounded and therefore absent from the query, fell
+  live capture where the just-focused Terminal tab, backgrounded and therefore absent from the query, fell
   from tile 0 to tile 3 twenty milliseconds in, taking the highlight with it.
 - **testZOrderReportsWhatItMovedOnAColdModel** — the seed writes its answer into `lastFocusOrder` and only
   then asks `recomputeFocusRanks` what moved, so on a cold model (every `focusedAt` still 0, which is the
   launch case it runs in) the re-derivation finds its own answer already in place and reports nothing. The
   reducer then emits no log and no `.refreshUi` while the order really has changed, and an open switcher
   keeps drawing the old list. Teeth-verified: it fails against the pre-fix `return recomputeFocusRanks()`.
-  Live evidence — G-14 in the 2026-08-25 QA run moved the MRU front onto a Finder window with no
+  Live evidence — the 2026-08-25 QA run moved the MRU front onto a Finder window with no
   `zOrder seed reordered` line anywhere in its debug log, which is why three investigations dead-ended.
 - **testZOrderThatChangesNothingSaysNothing** — the other side: a seed that really changes nothing stays
   silent, so a first summon does not repaint for nothing.
@@ -242,6 +252,6 @@ managed to link the tab into a group — our own bookkeeping, not the user's rea
   is adopted by the brute-force scan and then sits Space-less, ordered-out and in no group. Switching to it
   wrote no focus at all, and the group formed a beat later (once the tab was on-screen and readable)
   re-elected the tab the user had just LEFT as the one it draws. Teeth-verified: without the second arm the
-  MRU stays `[549, 544]` and `groupRepresentative` answers 549, which is the live T-19 symptom.
+  MRU stays `[549, 544]` and `groupRepresentative` answers 549, which is the live symptom.
 - **testAnUngroupedTabJoiningASpaceOfAnInactiveAppDoesNotFront** — the control: the same join with the app in
   the background is not a switch the user made, and fronts nothing.

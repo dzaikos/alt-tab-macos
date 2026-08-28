@@ -231,11 +231,11 @@ extension AXUIElement {
     /// Resolve the AX element for ONE other-Space wid (there is no wid→element API). Returns the INSTANT a
     /// candidate is the target's WINDOW element — matching by wid (rather than collecting every window and
     /// reading a subrole per id) early-exits near the target's index, reaching far higher ids within the
-    /// budget. Subrole is judged downstream by the discriminator; here we only locate — but locating must
+    /// budget. Semantics are judged downstream by admission; here we only locate — but locating must
     /// check the ROLE: `_AXUIElementGetWindow` on ANY descendant returns the CONTAINING window's id, so every
     /// button/toolbar of the target also matches its wid, and a tabbed window's "tab bar" element routinely
     /// gets a LOWER AXUIElementID than the window element itself. Returning the first wid match handed the
-    /// discriminator that tab bar (role AXTabGroup, subrole nil), which it rightly rejected — so the launch
+    /// admission that tab bar (role AXTabGroup, subrole nil), which it rightly rejected — so the launch
     /// scan consistently missed every TABBED window until the first show's rescan got luckier (rec17). The
     /// role read costs IPC only on the target's own descendants: other elements fail the cheap wid guard.
     static func windowByBruteForce(_ pid: pid_t, _ wid: CGWindowID) -> AXUIElement? {
@@ -300,10 +300,9 @@ extension AXUIElement {
     /// `children` should come from the prior `.attributes([..., kAXChildrenAttribute])` call.
     ///
     /// **DIRECT children only, deliberately, and fullscreen windows are therefore not read here.** A
-    /// fullscreen window's tab bar is reachable — probed at length, see
-    /// `experimentations/TabbedWindowDetection.swift` — but only unevenly: Finder and Script Editor list the
-    /// containing AXGroup as a child, Terminal and TextEdit do not (their tab bar lives in a separate
-    /// NSToolbarFullScreenWindow that no downward walk reaches, only a coordinate hit-test).
+    /// fullscreen window's tab bar is reachable — probed at length — but only unevenly: Finder and Script
+    /// Editor list the containing AXGroup as a child, Terminal and TextEdit do not (their tab bar lives in a
+    /// separate NSToolbarFullScreenWindow that no downward walk reaches, only a coordinate hit-test).
     ///
     /// Descending one level was tried and REVERTED. It works, but it buys tab reading for SOME apps and not
     /// others, and that asymmetry is worse than the gap: a fullscreen active that can suddenly read its tabs
@@ -312,7 +311,14 @@ extension AXUIElement {
     /// a real window hidden, for a feature that is deliberately not needed. Fullscreen grouping is the
     /// geometry path's job: a fullscreen Space holds one window and its tabs, so the Space invariant plus
     /// Space-less-ness already identifies them.
-    static func tabGroupInfo(_ children: [AXUIElement]?) -> [String]? {
+    /// Returns the tab TITLES and the group's own identity (`TabGroupToken`), which is the `AXTabGroup`
+    /// element's `AXUIElementID`. The element was already in hand here and used to be discarded; every
+    /// window of a group hands out the same one while it is the selected tab, so it is a membership fact the
+    /// titles can only guess at. The BUTTONS are deliberately not kept: they are rebuilt by ordinary tab
+    /// operations (Finder rebuilds all of them on one Cmd+T) and each reports the SELECTED window's wid
+    /// rather than its own, so a button is neither stable nor self-naming. Measured on Finder, Terminal and
+    /// TextEdit.
+    static func tabGroupInfo(_ children: [AXUIElement]?) -> (titles: [String], token: TabGroupToken?)? {
         guard let children else { return nil }
         for child in children {
             let a = try? child.attributes([kAXRoleAttribute, kAXChildrenAttribute])
@@ -322,7 +328,7 @@ extension AXUIElement {
                 guard t?.subrole == "AXTabButton" else { return nil }
                 return t?.title ?? ""
             }
-            return titles.count >= 2 ? titles : nil
+            return titles.count >= 2 ? (titles, child.id()) : nil
         }
         return nil
     }

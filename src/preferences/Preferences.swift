@@ -245,7 +245,7 @@ class Preferences {
         cachedAll = nil
     }
 
-    static func onlyShowMainWindows(_ index: Int = SwitcherSession.activeShortcutIndex) -> Bool {
+    static func showsOneWindowPerApp(_ index: Int = SwitcherSession.activeShortcutIndex) -> Bool {
         return groupApps(index) == .mainWindow
     }
 

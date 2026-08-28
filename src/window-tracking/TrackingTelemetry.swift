@@ -234,8 +234,8 @@ struct TrackingTelemetrySummary: Codable, Equatable {
     var recordsDropped: Int
 }
 
-/// The timeline format `alt-tab-qa` stores beside `results.json`: one record per line, keys sorted so two runs
-/// diff cleanly.
+/// The timeline format the QA harness stores alongside its results: one record per line, keys sorted so two
+/// runs diff cleanly.
 enum TrackingTelemetryNdjson {
     static func line(_ record: TelemetryRecord) -> String {
         guard let data = try? encoder.encode(record), let line = String(data: data, encoding: .utf8) else {

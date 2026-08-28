@@ -10,3 +10,28 @@ struct ApplicationState: Equatable {
     var localizedName: String?
     var isHidden: Bool
 }
+
+enum ApplicationAdmissionEvidence: Equatable {
+    case discovery
+    case attention
+}
+
+enum ApplicationAdmissionResolver {
+    static func accepts(isXpc: Bool, isZombie: Bool, isKnownUserFacingException: Bool,
+                        evidence: ApplicationAdmissionEvidence) -> Bool {
+        guard !isZombie else { return false }
+        return !isXpc || isKnownUserFacingException || evidence == .attention
+    }
+}
+
+/// Only `.regular` apps get a placeholder row. An accessory app with no window is a menubar agent, and
+/// having been frontmost doesn't make it one the user can switch back to: Raycast's palette and
+/// CoreServicesUIAgent's Gatekeeper alert both activate their process, then leave a process whose only
+/// surfaces are auxiliary. Pinned by `testAccessoryApplicationNeverGetsPlaceholder`.
+enum WindowlessApplicationResolver {
+    static func shouldCreate(isRegular: Bool, isTerminated: Bool, hasExistingPlaceholder: Bool,
+                             hasNonPhantomWindow: Bool) -> Bool {
+        guard !isTerminated, !hasExistingPlaceholder, !hasNonPhantomWindow else { return false }
+        return isRegular
+    }
+}

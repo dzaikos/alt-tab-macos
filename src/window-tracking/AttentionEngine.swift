@@ -18,22 +18,43 @@ class AttentionEngine {
     private static var driver = AttentionDriver()
     private static var generations = [pid_t: UInt64]()
 
+    static var currentUserContext: CurrentUserContext { driver.attention.currentUserContext }
+
+    static func lastAttendedWindow(_ pid: pid_t) -> CGWindowID? {
+        driver.attention.lastAttendedWindow(pid)?.wid
+    }
+
+    struct DispatchOutcome {
+        var attention: (wid: CGWindowID, observed: CGWindowID)? = nil
+        var readPid: pid_t? = nil
+    }
+
     /// A dispatch just ran. Returns the window the attention model decided to put in front, for the bridge to
     /// apply inside the same dispatch: deferring it to the next runloop turn would let the switcher draw one
     /// frame with the old order first.
     @discardableResult
-    static func dispatched(_ input: ReducerInput) -> (wid: CGWindowID, observed: CGWindowID)? {
+    static func dispatched(_ input: ReducerInput) -> DispatchOutcome {
         // Our own commit coming back through the bridge. Deciding on it again would decide against our own
         // output.
-        if case .attentionCommitted = input { return nil }
+        if case .attentionCommitted = input { return DispatchOutcome() }
+        if case let .axFocusedWindowRead(pid, wid, viaActivationRead) = input,
+           Windows.byWindowId[WindowSurfaceInventory.representativeWid(wid)] == nil {
+            withRepresentedWindow(wid, pid: pid, success: { TrackedWindowStateBridge.dispatch(input) }) {
+                if viaActivationRead {
+                    TrackedWindowStateBridge.dispatch(.axFocusedWindowReadFailed(pid: pid))
+                }
+            }
+            return DispatchOutcome()
+        }
         let context = context()
         let outcome = driver.decide(input, context: context)
-        guard let target = outcome.wid else { return nil }
-        let pid = context.pidOf(target)
+        guard let target = outcome.wid else { return DispatchOutcome(attention: nil, readPid: outcome.readPid) }
+        Windows.promoteAttentionEvidence(outcome.observedWid ?? target)
+        let pid = Windows.byWindowId[target]?.application.pid
         TrackingTelemetryRecorder.attentionCommitted(pid: pid ?? 0, wid: target,
             processGeneration: pid.flatMap { generations[$0] }, source: provider(of: input),
             reason: AttentionDriver.reason(for: input), status: outcome.reason)
-        return (target, outcome.observedWid ?? target)
+        return DispatchOutcome(attention: (target, outcome.observedWid ?? target), readPid: outcome.readPid)
     }
 
     /// Which channel named the window, for telemetry. The reducer's vocabulary says where an input came from,
@@ -51,6 +72,7 @@ class AttentionEngine {
     /// through its own AX observer.
     private static func commit(_ wid: CGWindowID?, observed: CGWindowID? = nil) {
         guard let wid else { return }
+        Windows.promoteAttentionEvidence(observed ?? wid)
         TrackedWindowStateBridge.dispatch(.attentionCommitted(wid: wid, observed: observed ?? wid,
             at: ProcessInfo.processInfo.systemUptime))
     }
@@ -86,7 +108,7 @@ class AttentionEngine {
     /// An app raising all its windows really does move its key window to each of them in turn (#5974's
     /// shape, measured at 29ms apart), and the accessibility channel reports every step faithfully. Each step
     /// is a true statement and the run as a whole is one z-order change in which the user went nowhere: the
-    /// app puts keys back where they started at the end. Committing each answer scrambled the order (A-10).
+    /// app puts keys back where they started at the end. Committing each answer scrambled the order.
     ///
     /// The last answer is the right one for both cases — the raise ends where it started, a genuine switch
     /// ends on the new window — so waiting for the run to stop is enough, and nothing has to be guessed in
@@ -108,6 +130,14 @@ class AttentionEngine {
     private static var settlePolicy = AttentionSettlePolicy()
 
     private static func applySemanticFocus(pid: pid_t, wid: CGWindowID) {
+        let representativeWid = WindowSurfaceInventory.representativeWid(wid)
+        guard Windows.byWindowId[representativeWid] != nil else {
+            return withRepresentedWindow(wid, pid: pid,
+                success: { applySemanticFocus(pid: pid, wid: wid) }) {
+                    TrackingTelemetryRecorder.attentionRefused(pid: pid, wid: wid,
+                        source: .accessibility, reason: "unrepresented")
+                }
+        }
         let outcome = driver.decideSemantic(pid: pid, wid: wid, context: context())
         // Only a COMMITTED result is attention. Writing the refused ones as attention too would leave
         // `lastAttention` reporting a window the rules had just declined, which is the opposite of what a
@@ -126,13 +156,33 @@ class AttentionEngine {
 
     /// A click naming its target window (subtype 9; the reactivate and Cmd+` subtypes are decoded but have
     /// never been observed firing). It names both the app and the window at once, so it is the one input
-    /// that commits immediately, without waiting for the app to speak.
+    /// that commits immediately, without waiting for the app to speak. Field 40 has public target-pid
+    /// semantics; matching it against a tracked window's cached owner makes the private wid field fail
+    /// closed without another WindowServer call.
     static func directedAttention(_ kind: DirectedAttentionKind, pid: pid_t, wid: CGWindowID, subtype: Int) {
         TrackingTelemetryRecorder.sessionTapEvent(subtype: subtype, pid: pid, wid: wid, decoded: true)
-        // About EXISTENCE, not order: a window the user demonstrably clicked is shown even if its app never
-        // answers AX. Without this the click channel names a window the switcher still refuses to draw.
-        Windows.promoteDirected(wid)
-        representDirectedWindow(wid, pid: pid)
+        guard Windows.byWindowId[wid] != nil else {
+            return withRepresentedWindow(wid, pid: pid, success: {
+                applyDirectedAttention(kind, pid: pid, wid: wid)
+            }) {
+                TrackingTelemetryRecorder.attentionRefused(pid: pid, wid: wid,
+                    source: .annotatedSession, reason: "unrepresented")
+            }
+        }
+        applyDirectedAttention(kind, pid: pid, wid: wid)
+    }
+
+    private static func applyDirectedAttention(_ kind: DirectedAttentionKind, pid: pid_t, wid: CGWindowID) {
+        let representativeWid = WindowSurfaceInventory.representativeWid(wid)
+        guard let window = Windows.byWindowId[representativeWid] else {
+            return TrackingTelemetryRecorder.attentionRefused(pid: pid, wid: wid,
+                source: .annotatedSession, reason: "unrepresented")
+        }
+        guard window.application.pid == pid else {
+            return TrackingTelemetryRecorder.attentionRefused(pid: pid, wid: wid,
+                source: .annotatedSession, reason: "pidMismatch")
+        }
+        Windows.promoteAttentionEvidence(wid)
         let outcome = driver.decideDirected(kind, pid: pid, wid: wid, context: context())
         guard let target = outcome.wid else {
             return TrackingTelemetryRecorder.attentionRefused(pid: pid, wid: wid, source: .annotatedSession,
@@ -144,17 +194,60 @@ class AttentionEngine {
         commit(target, observed: outcome.observedWid)
     }
 
-    /// **A click named a window nobody is tracking.** Its app is not answering accessibility — otherwise
-    /// discovery would have it — so the WindowServer's own row is all there is, and it is enough: the user is
-    /// looking at that window right now.
-    private static func representDirectedWindow(_ wid: CGWindowID, pid: pid_t) {
-        guard Windows.byWindowId[wid] == nil else { return }
+    /// Attention can beat discovery by several milliseconds. Hold the decision until the WindowServer row has
+    /// a model object, or the reducer would correctly reject an unknown wid and no later event would replay it.
+    private struct RepresentationWaiter {
+        let process: ProcessGeneration
+        let success: () -> Void
+        let failure: () -> Void
+    }
+
+    private static var representationWaiters = [CGWindowID: [RepresentationWaiter]]()
+
+    private static func withRepresentedWindow(_ wid: CGWindowID, pid: pid_t,
+                                              success: @escaping () -> Void,
+                                              failure: @escaping () -> Void) {
+        let knownRepresentative = WindowSurfaceInventory.representativeWid(wid)
+        guard Windows.byWindowId[knownRepresentative] == nil else { return success() }
+        let process = ProcessGeneration(pid: pid, generation: generation(of: pid))
+        let waiter = RepresentationWaiter(process: process, success: success, failure: failure)
+        if representationWaiters[wid] != nil {
+            representationWaiters[wid]?.append(waiter)
+            return
+        }
+        representationWaiters[wid] = [waiter]
         CGSCallScheduler.run {
-            guard let raw = WindowServerQuery.query([wid]).first else { return }
+            guard let observed = WindowServerQuery.query([wid]).first else {
+                return DispatchQueue.main.async {
+                    representationWaiters.removeValue(forKey: wid)?.forEach { $0.failure() }
+                }
+            }
+            var rows = [observed]
+            if observed.parentWid != 0, let parent = WindowServerQuery.query([observed.parentWid]).first {
+                rows.append(parent)
+            }
             DispatchQueue.main.async {
-                guard Windows.byWindowId[wid] == nil, let app = Applications.findOrCreate(pid, false) else { return }
-                WindowServerEvents.subscribe(wid)
-                Windows.findOrCreateCandidate(raw, app)
+                guard let waiters = representationWaiters.removeValue(forKey: wid) else { return }
+                let live = waiters.filter { generations[$0.process.pid] == $0.process.generation }
+                WindowSurfaceInventory.upsert(rows)
+                let matching = live.filter { $0.process.pid == observed.pid }
+                live.filter { $0.process.pid != observed.pid }.forEach { $0.failure() }
+                guard !matching.isEmpty else { return }
+                let representativeWid = WindowSurfaceInventory.representativeWid(wid)
+                guard let representative = WindowSurfaceInventory.raw(representativeWid) else {
+                    return matching.forEach { $0.failure() }
+                }
+                if Windows.byWindowId[representativeWid] == nil {
+                    guard let app = Applications.findOrCreate(representative.pid, false, evidence: .attention) else {
+                        return matching.forEach { $0.failure() }
+                    }
+                    WindowServerEvents.subscribe(representativeWid)
+                    guard Windows.findOrCreateCandidate(observed, app) != nil else {
+                        return matching.forEach { $0.failure() }
+                    }
+                    Applications.discoverWindow(representativeWid)
+                }
+                for waiter in matching { waiter.success() }
             }
         }
     }
@@ -168,8 +261,12 @@ class AttentionEngine {
                 generations[pid] = generation
                 return ProcessGeneration(pid: pid, generation: generation)
             },
-            pidOf: { wid in Windows.list.first { $0.cgWindowId == wid }?.application.pid },
-            representativeOf: { wid in TabGroups.groupId(of: wid).flatMap { TabGroups.representativeByGroup[$0] } ?? wid },
+            representativeOf: { wid in
+                let physicalRepresentative = WindowSurfaceInventory.representativeWid(wid)
+                guard Windows.byWindowId[physicalRepresentative] != nil else { return nil }
+                return TabGroups.groupId(of: physicalRepresentative).flatMap { TabGroups.representativeByGroup[$0] }
+                    ?? physicalRepresentative
+            },
             frontmostPid: { Applications.frontmostPid })
     }
 }

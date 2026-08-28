@@ -167,7 +167,7 @@ final class WindowEventReducerFocusTests: XCTestCase {
 
     // MARK: a window being born
 
-    /// The birth sequence the WindowServer actually emits, from the WL-03 capture: a create, a join of the
+    /// The birth sequence the WindowServer actually emits, from the live capture: a create, a join of the
     /// visible Space, then discovery once the OS has sized the window (it is published at 0×0 first).
     private func birthSteps(_ wid: CGWindowID, _ pid: pid_t, _ title: String) -> [TestReducerRunner.Step] {
         [.input(.windowCreated(wid: wid, now: 100, inSpaceTransition: false)),
@@ -175,10 +175,10 @@ final class WindowEventReducerFocusTests: XCTestCase {
                                         inSpaceTransition: false)),
          .track(window(wid, pid, title, order: 9)),
          .input(.discoveryLanded(wid: wid, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                 queriedSpaceIds: [4], isOrderedIn: true, tabTitles: nil))]
+                                 queriedSpaceIds: [4], isOrderedIn: true, tabTitles: nil, tabGroupToken: nil))]
     }
 
-    /// **A window being born is not the user going to it** (QA WL-03). The user is in Finder while an app
+    /// **A window being born is not the user going to it**, seen live. The user is in Finder while an app
     /// finishes launching behind them; its windows must be discovered without taking the front. The join of
     /// the visible Space is what used to front them: it asserts a promotion, which is right for a REUSED wid
     /// arriving with no create event (a tab switch mints no create) and wrong for every birth.
@@ -192,7 +192,7 @@ final class WindowEventReducerFocusTests: XCTestCase {
         XCTAssertNotNil(harness.state.window(Self.reaperDialogWid), "and it must still be discovered")
     }
 
-    /// The same rule when the born window belongs to the app the user is ALREADY in (QA WL-02): twenty
+    /// The same rule when the born window belongs to the app the user is ALREADY in, seen live: twenty
     /// windows opening at once is not twenty visits, so the window they were on keeps the front. Being in
     /// the app is what makes this the harder half — the frontmost-app test the circumstantial promotion
     /// applies would pass here.

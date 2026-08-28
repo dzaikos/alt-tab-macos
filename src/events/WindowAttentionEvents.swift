@@ -13,7 +13,7 @@ import Cocoa
 /// 22/23 resign pair afterwards. Five minutes of ordinary use produced 17 type-13 events: 2 x sub 9, 7 x sub
 /// 22, 8 x sub 23. So `clickReactivate` and `commandBacktick` are decoded but have never been observed
 /// firing. Treat this channel as the click channel and nothing more; anything else that needs naming has to
-/// come from the app's own Accessibility answer. Measurements: `global-focus-read/SCENARIOS.md` §C, §E, §M.
+/// come from the app's own Accessibility answer.
 ///
 /// Three placements were compared with the same mask; only the annotated session tap sees events addressed to
 /// other processes:
@@ -28,8 +28,8 @@ import Cocoa
 /// cannot gate the cursor the way #5911's active tap did. It reads three integer fields and forwards them;
 /// keyboard events carry `field 51 = 0` and were verified to expose no key content through this accessor.
 ///
-/// **A stalled app delays this tap only when it is mid-activation.** Eight trials, one variable at a time
-/// (`SCENARIOS.md` §P): an app that simply wedges delays nothing but Accessibility — the tap lands in 1-25 ms
+/// **A stalled app delays this tap only when it is mid-activation.** Eight trials, one variable at a time:
+/// an app that simply wedges delays nothing but Accessibility — the tap lands in 1-25 ms
 /// and the WindowServer in 30-41 ms while AX waits out the whole stall. But an app that wedges while holding
 /// an outstanding key-window request defers **every** source together: tap, 808, NSWorkspace and AX all land
 /// at the unwedge, within ~14 ms of each other. `makeKeyWindow` with no raise behaves the same as
@@ -48,23 +48,41 @@ class WindowAttentionEvents {
     /// CGS field ids. Not in `CGEventTypes.h`, but `CGEventGetIntegerValueField` is public API and these are
     /// the ids its private cousin `SLEventGetEventRecord` reads the same values from — cross-checked field by
     /// field against the raw `SLSEventRecord` on macOS 26.6.
-    private static let fieldTargetPid = CGEventField(rawValue: 40)!
-    private static let fieldWindowId = CGEventField(rawValue: 51)!
-    private static let fieldRecordLength = CGEventField(rawValue: 50)!
-    private static let fieldSubtype = CGEventField(rawValue: 83)!
+    private struct Fields {
+        let targetPid: CGEventField
+        let windowId: CGEventField
+        let recordLength: CGEventField
+        let subtype: CGEventField
+
+        init?() {
+            guard let targetPid = CGEventField(rawValue: 40),
+                  let windowId = CGEventField(rawValue: 51),
+                  let recordLength = CGEventField(rawValue: 50),
+                  let subtype = CGEventField(rawValue: 83) else { return nil }
+            self.targetPid = targetPid
+            self.windowId = windowId
+            self.recordLength = recordLength
+            self.subtype = subtype
+        }
+    }
+    private static let fields = Fields()
     /// AppKit-defined events. `NSEvent.EventType.appKitDefined` is 13; the mask is that bit alone.
     private static let appKitDefinedType = 13
     /// the record length every measured type-13 event carried, used as the layout probe
     private static let expectedRecordLength = 248
 
     private static var eventTap: CFMachPort?
-    private static var layoutVerified = false
     /// Independent kill switch: a provider this experimental must be switchable off without touching the
     /// others.
     static var enabled = true
 
     static func observe() {
         guard enabled else { return }
+        guard fields != nil else {
+            Logger.debug { "attention tap: event fields unsupported" }
+            TrackingTelemetryRecorder.attentionTapLifecycle(installed: false, enabled: false)
+            return
+        }
         eventTap = CGEvent.tapCreate(
             tap: .cgAnnotatedSessionEventTap,
             place: .headInsertEventTap,
@@ -103,14 +121,14 @@ class WindowAttentionEvents {
     /// the field ids may mean something else on this OS build and a wid read from them would be a guess. The
     /// event is counted as invalid and nothing is stamped.
     private static func decode(_ event: CGEvent) {
-        let length = event.getIntegerValueField(fieldRecordLength)
+        guard let fields else { return }
+        let length = event.getIntegerValueField(fields.recordLength)
         guard length == expectedRecordLength else { return invalid(nil) }
-        let subtype = Int(event.getIntegerValueField(fieldSubtype))
+        let subtype = Int(event.getIntegerValueField(fields.subtype))
         guard let kind = AttentionSubtype(rawValue: subtype) else { return other(subtype) }
-        let wid = CGWindowID(truncatingIfNeeded: event.getIntegerValueField(fieldWindowId))
-        let pid = pid_t(truncatingIfNeeded: event.getIntegerValueField(fieldTargetPid))
+        let wid = CGWindowID(truncatingIfNeeded: event.getIntegerValueField(fields.windowId))
+        let pid = pid_t(truncatingIfNeeded: event.getIntegerValueField(fields.targetPid))
         guard wid != 0, pid > 0 else { return invalid(subtype) }
-        layoutVerified = true
         DispatchQueue.main.async { deliver(kind, pid: pid, wid: wid) }
     }
 

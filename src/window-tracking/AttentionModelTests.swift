@@ -39,6 +39,7 @@ final class AttentionModelTests: XCTestCase {
         var state = state()
         XCTAssertEqual(AttentionModel.reduce(&state, .frontProcessChanged(p1)), .readFocusedWindow(p1))
         XCTAssertNil(state.visibleFront)
+        XCTAssertEqual(state.currentUserContext, .application(p1))
     }
 
     /// ...and an activation that already has an answer asks for nothing.
@@ -48,12 +49,24 @@ final class AttentionModelTests: XCTestCase {
         XCTAssertEqual(AttentionModel.reduce(&state, .frontProcessChanged(p1)), .front(wid(p1, 1)))
     }
 
+    /// A lifecycle edge invalidates a cached answer instead of letting a later activation resurrect a wid
+    /// that no longer exists.
+    func testInvalidatedWindowMakesTheNextActivationReadAgain() {
+        var state = state()
+        name(&state, .app, wid(p1, 1), 2)
+        _ = AttentionModel.reduce(&state, .frontProcessChanged(p1))
+        XCTAssertEqual(AttentionModel.reduce(&state, .windowInvalidated(1)), .none)
+        XCTAssertNil(state.visibleFront)
+        XCTAssertEqual(AttentionModel.reduce(&state, .frontProcessChanged(p1)), .readFocusedWindow(p1))
+    }
+
     /// The click names the app and the window in the same breath, 11 ms before NSWorkspace says anything.
     func testClickCarriesBothLevels() {
         var state = state()
         _ = AttentionModel.reduce(&state, .frontProcessChanged(p1))
         XCTAssertEqual(name(&state, .click, wid(p2, 7), 2), .front(wid(p2, 7)))
         XCTAssertEqual(state.frontProcess, p2)
+        XCTAssertEqual(state.currentUserContext, .window(wid(p2, 7)))
     }
 
     /// R2: the app talks about itself only. A late answer from the app the user left cannot take the front.
@@ -107,6 +120,7 @@ final class AttentionModelTests: XCTestCase {
         _ = AttentionModel.reduce(&state, .frontProcessChanged(p2))
         XCTAssertNil(state.visibleFront)
         XCTAssertEqual(state.focusedWindow[p1]?.target, wid(p1, 1))
+        XCTAssertEqual(state.currentUserContext, .application(p2))
     }
 
     /// A window enters as the one that stands for it in the switcher.
@@ -156,6 +170,16 @@ final class AttentionModelTests: XCTestCase {
         XCTAssertNil(state.frontProcess)
         XCTAssertNil(state.visibleFront)
         XCTAssertEqual(state.focusedWindow[p2]?.target, wid(p2, 7))
+        XCTAssertEqual(state.currentUserContext, .unknown)
+    }
+
+    func testLastAttendedWindowIsPerLiveApplication() {
+        var state = state()
+        name(&state, .app, wid(p1, 1), 2)
+        name(&state, .click, wid(p2, 7), 3)
+        XCTAssertEqual(state.lastAttendedWindow(p1.pid), wid(p1, 1))
+        XCTAssertEqual(state.lastAttendedWindow(p2.pid), wid(p2, 7))
+        XCTAssertNil(state.lastAttendedWindow(999))
     }
 
     /// #5974's shape: an app raising all its windows emits one true answer per window, 0.6 ms apart, and ends
@@ -178,7 +202,7 @@ final class AttentionModelTests: XCTestCase {
         XCTAssertEqual(name(&state, .app, wid(p1, 1), 3), .recorded(wid(p1, 1)))
     }
 
-    /// The measured stale-answer race (`SCENARIOS.md` §P, C2b/C3b): the app changed its key window, wedged
+    /// The measured stale-answer race: the app changed its key window, wedged
     /// with that notification queued, and the user clicked a different window. At the unwedge the stale
     /// answer comes out FIRST and the app's report of the click's own outcome comes out LAST, all inside
     /// 11 ms. Arrival order alone resolves it, which is why no "the click holds its target" guard exists.

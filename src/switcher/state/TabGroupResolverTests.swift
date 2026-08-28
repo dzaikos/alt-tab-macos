@@ -10,11 +10,12 @@ final class TabGroupResolverTests: XCTestCase {
                     position: CGPoint? = CGPoint(x: 100, y: 100), spaceIds: [UInt64] = [1],
                     title: String = "", isTabbed: Bool = false, isFullscreen: Bool = false,
                     isMinimized: Bool = false, tabbedSiblingWids: [CGWindowID]? = nil,
-                    isOrderedIn: Bool = false, lastFocusOrder: Int = 0, tabCount: Int = 0) -> TabWindow {
+                    isOrderedIn: Bool = false, lastFocusOrder: Int = 0, tabCount: Int = 0,
+                    tabGroupToken: TabGroupToken? = nil) -> TabWindow {
         TabWindow(pid: pid, wid: wid, size: size, position: position, spaceIds: spaceIds, title: title,
             isTabbed: isTabbed, isFullscreen: isFullscreen, isMinimized: isMinimized,
             tabbedSiblingWids: tabbedSiblingWids, isOrderedIn: isOrderedIn,
-            lastFocusOrder: lastFocusOrder, tabCount: tabCount)
+            lastFocusOrder: lastFocusOrder, tabCount: tabCount, tabGroupToken: tabGroupToken)
     }
 
     // MARK: - A. geometryGroups
@@ -102,7 +103,7 @@ final class TabGroupResolverTests: XCTestCase {
     func testTabCountKeepsACascadedMergedClusterWhole() {
         // Merge All Windows leaves every tab at its PRE-MERGE cascade position — the OS never converges their
         // frames — so the position split (`framePartitions`) put each tab in its own partition and no merged
-        // group could form at all (live QA 2026-07-30, T-03/T-04). Position is there to separate two WINDOWS
+        // group could form at all (live QA 2026-07-30). Position is there to separate two WINDOWS
         // that merely share a size, and here AX has already answered that question: the visible declares 3
         // tabs and the cluster holds exactly 3 same-size members, so there is no room for a second window.
         let visible = tw(wid: 1, position: CGPoint(x: 158, y: 158), spaceIds: [1], tabCount: 3)
@@ -475,6 +476,82 @@ final class TabGroupResolverTests: XCTestCase {
         XCTAssertEqual(m, SiblingMatch(siblingWids: [1, 2], matchedWids: [2], untrackedTitles: [], toUntabWids: []))
     }
 
+    // MARK: - B2. matchSiblings — the group token
+
+    func testTokenClaimsSiblingNoTitleCanName() {
+        // #5785's shape: Terminal composes tab titles unlike window titles, so no title names the sibling and
+        // the frames disagree (the tab bar resized the active). Both windows named the same AXTabGroup
+        // element, which settles it without either.
+        let active = tw(wid: 1, title: "1. bash", tabGroupToken: 77)
+        let sibling = tw(wid: 2, spaceIds: [], title: "~/git — -zsh — 80×25", tabGroupToken: 77)
+        let m = TabGroupResolver.matchSiblings(active: active, axTitles: ["nothing", "matches"],
+            sameAppWindows: [active, sibling])
+        XCTAssertEqual(m.siblingWids, [1, 2])
+        XCTAssertEqual(m.matchedWids, [2])
+        XCTAssertEqual(m.toUntabWids, [])
+        // one title is still reported untracked, and that is not the token's doing: when the app composes tab
+        // titles unlike window titles the ACTIVE's own title is not among them either, so N titles are shared
+        // by N-1 claimable siblings. The token pays for one of them, which is one fewer brute-force scan.
+        XCTAssertEqual(m.untrackedTitles, ["matches"])
+    }
+
+    func testTokenClaimBringsTheSiblingsWholeGroup() {
+        // generator seed 18: only the two most recent tabs had ever been read as active, so only they carry a
+        // token. `form` is exact-set, so claiming just the one the token reached would EJECT the third tab
+        // from the group it never left, splitting one window into two tiles.
+        let active = tw(wid: 3, title: "c", tabGroupToken: 77)
+        let tokenSibling = tw(wid: 2, spaceIds: [], title: "b", isTabbed: true,
+                              tabbedSiblingWids: [1, 2], tabGroupToken: 77)
+        let older = tw(wid: 1, spaceIds: [], title: "a", tabbedSiblingWids: [1, 2])
+        let m = TabGroupResolver.matchSiblings(active: active, axTitles: ["nothing", "matches", "either"],
+            sameAppWindows: [active, tokenSibling, older])
+        XCTAssertEqual(m.siblingWids.sorted(), [1, 2, 3])
+        XCTAssertEqual(m.toUntabWids, [], "no member of the group being joined is un-tabbed by joining it")
+    }
+
+    func testTokenDoesNotClaimAnOnScreenWindow() {
+        // A token is recorded when a window is read as the selected tab and OUTLIVES that instant, so it can
+        // name a window that has since been torn out. Outside a creation the on-screen protection stands:
+        // claiming this would hide a real window, which is worse than failing to group a tab.
+        let active = tw(wid: 1, title: "a", tabGroupToken: 77)
+        let torn = tw(wid: 2, spaceIds: [1], title: "b", isOrderedIn: true, tabGroupToken: 77)
+        let m = TabGroupResolver.matchSiblings(active: active, axTitles: ["a", "b"],
+            sameAppWindows: [active, torn])
+        XCTAssertEqual(m.matchedWids, [], "an on-screen window is nobody's background tab, token or not")
+    }
+
+    func testNewlyDiscoveredTokenClaimsTheOutgoingTabStillOnItsSpace() {
+        // Cmd+T: the new tab is announced with the group's element already readable, while the tab it
+        // replaced still shows its stale Space. Same sanctioned atomic claim the size-matched second pass
+        // makes, on better evidence — here the frames disagree, so only the token can do it.
+        let active = tw(wid: 2, size: CGSize(width: 800, height: 560), title: "new", tabGroupToken: 77)
+        let outgoing = tw(wid: 1, size: CGSize(width: 800, height: 600), spaceIds: [1], title: "old",
+                          isOrderedIn: true, tabGroupToken: 77)
+        let m = TabGroupResolver.matchSiblings(active: active, axTitles: ["new", "old"],
+            sameAppWindows: [active, outgoing], activeIsNewlyDiscovered: true)
+        XCTAssertEqual(m.matchedWids, [1])
+    }
+
+    func testAbsentTokensAreNotAMatch() {
+        // the trap in `a == b` when both are nil: two windows nobody has ever read as a selected tab must not
+        // become siblings by both being unknown.
+        let active = tw(wid: 1, title: "a")
+        let stranger = tw(wid: 2, spaceIds: [], title: "b")
+        let m = TabGroupResolver.matchSiblings(active: active, axTitles: ["a", "zzz"],
+            sameAppWindows: [active, stranger])
+        XCTAssertEqual(m.matchedWids, [])
+    }
+
+    func testTokenDoesNotClaimAFullscreenWindow() {
+        // entering fullscreen REPLACES the element, so a fullscreen window never really shares a windowed
+        // group's token. The fullscreen Space invariant is stated here too rather than assumed.
+        let active = tw(wid: 1, title: "a", tabGroupToken: 77)
+        let full = tw(wid: 2, spaceIds: [], title: "b", isFullscreen: true, tabGroupToken: 77)
+        let m = TabGroupResolver.matchSiblings(active: active, axTitles: ["a", "b"],
+            sameAppWindows: [active, full])
+        XCTAssertEqual(m.matchedWids, [])
+    }
+
     // MARK: - C. positionsCompatible
 
     func testExistingLinkBeatsFarPosition() {
@@ -831,6 +908,44 @@ final class TabGroupResolverTests: XCTestCase {
         var t = TabGroupsTable()
         _ = t.form(wids, representative: wids[0], reason: "test", repPicker: { r, _ in r.first })
         return t
+    }
+
+    // MARK: - F2. the token store (`TabGroupsTable.recordToken`)
+
+    func testNilTokenReadNeverClearsTheStoredOne() {
+        // only the SELECTED tab exposes a tab bar, and Terminal's and TextEdit's fullscreen bars are in a
+        // window no downward walk reaches — so "no token now" is routine for a window that is still a tab.
+        var t = table([1, 2])
+        t.recordToken(77, for: 1)
+        t.recordToken(nil, for: 1)
+        XCTAssertEqual(t.tokenByWid[1], 77)
+    }
+
+    func testADifferentTokenOverwrites() {
+        // a tab dragged into another window's bar keeps its element and its wid and reports the DESTINATION's
+        // group from then on; overwriting is what stops the old group still claiming it.
+        var t = table([1, 2])
+        t.recordToken(77, for: 1)
+        t.recordToken(88, for: 1)
+        XCTAssertEqual(t.tokenByWid[1], 88)
+    }
+
+    func testLeavingAGroupClearsTheToken() {
+        // a token must never name a window that is no longer in the group, or the next read would drag it
+        // back in.
+        var t = table([1, 2, 3])
+        t.recordToken(77, for: 2)
+        _ = t.remove(2, reason: "test", repPicker: { r, _ in r.first })
+        XCTAssertNil(t.tokenByWid[2])
+    }
+
+    func testDissolvingAGroupClearsEveryToken() {
+        var t = table([1, 2])
+        t.recordToken(77, for: 1)
+        t.recordToken(77, for: 2)
+        _ = t.remove(2, reason: "test", repPicker: { r, _ in r.first })   // 2 leaves, so the group dissolves
+        XCTAssertNil(t.tokenByWid[1])
+        XCTAssertNil(t.tokenByWid[2])
     }
 
     func testDissolveWhenOneSurvivor() {

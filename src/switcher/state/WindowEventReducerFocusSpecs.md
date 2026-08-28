@@ -4,8 +4,8 @@
 
 Two things, and only two, move MRU slot 0 inside the reducer: a decision from `AttentionModel` arriving as
 `.attentionCommitted`, and a structural repair. `window-tracking/AttentionOrderSpecs.md` states the same rule
-for the whole app; this covers the reducer's half of it. Everything the WindowServer says about order and focus is
-kept for what it is authoritative about — a window exists, is on screen, moved, changed Space — and is
+for the whole app; this covers the reducer's half of it. Everything the WindowServer says about order and
+focus is kept for what it is authoritative about — a window exists, is on screen, moved, changed Space — and is
 refused as a statement about the user.
 
 Specs + Tests without a same-named kernel (like `WindowEventReducerPhantom`): the subject is a set of reducer
@@ -14,10 +14,10 @@ rule-level ones drive `WindowEventReducer.reduce` directly.
 
 ## Why the physical events lost the order
 
-Measured across twelve focus scenarios, all four signal sources on one clock
-(`~/git/alt-tab-experiments/global-focus-read/SCENARIOS.md`):
+Measured across twelve focus scenarios, all four signal sources on one clock:
 
-- accessibility names the window in 9 of 12 and is the EARLIEST source in 7, including every in-app case
+- accessibility names the window in 10 of 12 and is the earliest window-naming source in 8, including the
+  Space-switch follow-up and every healthy in-app case
 - the WindowServer is never the best source in any scenario where anything else speaks, and has no exclusive
   scenario at all
 - on an activation it fires once per on-Space window, which is a set rather than an answer
@@ -25,8 +25,7 @@ Measured across twelve focus scenarios, all four signal sources on one clock
 
 So every rule that read an 808 or an 815 as "the user went here" was reconstructing, later and less reliably,
 something the app had already said. All of them are gone rather than gated: there is one engine, no mode and
-no runtime switch. To compare against the old behaviour, check out the last commit before the rework and run
-the same QA suite against that build.
+no runtime switch.
 
 ## The removal repair (#5346)
 
@@ -69,9 +68,9 @@ own any more — both were bursts of 815s and 808s, and neither event can reach 
 
 ### C. A window being born
 
-- **testAWindowBornInTheBackgroundDoesNotTakeTheFront** — WL-03: an app finishing its launch behind the user
+- **testAWindowBornInTheBackgroundDoesNotTakeTheFront** — an app finishing its launch behind the user
   is discovered without taking the front from where they are.
-- **testABurstOfWindowsBornInTheFrontmostAppDoesNotMoveTheFront** — WL-02: the same rule when the newcomers
+- **testABurstOfWindowsBornInTheFrontmostAppDoesNotMoveTheFront** — the same rule when the newcomers
   belong to the app the user is already in, which the frontmost-app test alone cannot catch.
 
 ### D. Tabs — the app naming one of its own tabs
@@ -85,5 +84,5 @@ own any more — both were bursts of 815s and 808s, and neither event can reach 
 
 - **testAnAppExposePickMovesOnlyThePickedWindow** — the pick is a click naming one window, and the re-show
   that puts every window of the app back lands either side of it. Only the picked window may move. The #5936
-  mute never covered this: it was armed when Exposé opened, seconds before the pick. QA I-25 is the live
+  mute never covered this: it was armed when Exposé opened, seconds before the pick. Live QA is the
   counterpart.

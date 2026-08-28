@@ -3,11 +3,10 @@ import ApplicationServices
 
 /// **One `AXObserver` per live process generation, and nothing per window.**
 ///
-/// The pre-WindowServer implementation created an observer for every app AND a second observer plus runloop
-/// source for every window. Orphaned per-window sources were the dominant cause of #5612 and its reported
-/// 399 GB of virtual-memory growth. An observer created for a pid and subscribed on the APPLICATION element
-/// receives the descendant window notifications this needs, so the per-window fleet buys nothing: the
-/// observer count here is one per eligible process and is independent of how many windows that process has.
+/// An observer created for a pid and subscribed on the APPLICATION element receives the descendant window
+/// notifications this needs. Per-window observers are therefore redundant, and orphaned per-window runloop
+/// sources caused #5612's reported 399 GB virtual-memory growth. The observer count here is one per eligible
+/// process and is independent of how many windows that process has.
 ///
 /// This provider contributes SEMANTICS only — which window an app considers focused or main. It is never
 /// asked what windows exist: that is the WindowServer's, and an AX failure must not remove a window, block
@@ -197,7 +196,7 @@ class AxObserverRegistry {
     /// **The cooldown has to be RELEASED before another attempt is possible.** A capability sitting in
     /// `.cooldown` refuses `beginSubscription`, so calling `subscribe` straight from here did nothing at all
     /// and the only thing retrying anything was the sparse tick — which is why a wedged app that started
-    /// answering again took up to a tick plus a cooldown to come back (WL-12).
+    /// answering again took up to a tick plus a cooldown to come back.
     private func scheduleRetry(_ process: ProcessGeneration, _ deadline: MonotonicTimestamp) {
         let delay = Double(deadline.rawValue &- Self.now().rawValue) / 1_000_000_000
         BackgroundWork.axSemanticsThread?.asyncAfter(max(delay, 0)) {

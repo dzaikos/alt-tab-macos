@@ -30,7 +30,8 @@ class TrackedWindowStateBridge {
         // would let the switcher draw one frame with the old order before the new one arrived, which is the
         // "right, but late" verdict the QA matrix scores separately from being right.
         let attention = AttentionEngine.dispatched(input)
-        if let attention {
+        if let pid = attention.readPid { effects.append(.readFocusedWindowOnActivation(pid: pid)) }
+        if let attention = attention.attention {
             effects += WindowEventReducer.reduce(&state, .attentionCommitted(wid: attention.wid,
                 observed: attention.observed, at: state.now))
         }
@@ -255,8 +256,8 @@ class TrackedWindowStateBridge {
                     // async for the same reason as the removal above: the caller can be iterating Windows.list
                     DispatchQueue.main.async { app.addWindowlessWindowIfNeeded() }
                 }
-            case .bumpFocusViaAxBackstop(let pid):
-                WindowServerEvents.bumpFocusOnActivation(pid)
+            case .readFocusedWindowOnActivation(let pid):
+                WindowServerEvents.readFocusedWindowOnActivation(pid)
             case .checkShortcutsForFocusedWindow:
                 if let frontmostPid = Applications.frontmostPid,
                    let frontmostApp = Applications.findOrCreate(frontmostPid, false),

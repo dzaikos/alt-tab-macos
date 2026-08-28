@@ -70,7 +70,7 @@ enum WindowEventReducer {
             state.carried.pendingGroupInheritance.removeValue(forKey: wid)
             if state.window(wid) != nil {
                 return [.log(state.removalLog(wid, reason: "wsDestroyed")), .removeWindow(wid)]
-                    + refrontAfterRemovingTheFocusedWindow(&state, wid: wid)
+                    + refrontAfterFocusedWindowBecomesUnavailable(&state, wid: wid)
             }
             return []
         case .windowMovedOrResized(let wid, let inSpaceTransition):
@@ -125,18 +125,18 @@ enum WindowEventReducer {
             return spaceTransitionStarted(&state)
         case .spaceChangeSettled:
             return spaceChangeSettled(&state)
-        case .appActivated(let pid, let now, let altTabTargetWid):
-            return appActivated(&state, pid: pid, now: now, altTabTargetWid: altTabTargetWid)
+        case .appActivated(let pid, _, _):
+            return appActivated(&state, pid: pid)
         case .discoveryLanded(let wid, let accepted, let newlyTracked, let adoptedAsInactiveTab, let queriedSpaceIds,
-                              let isOrderedIn, let tabTitles):
+                              let isOrderedIn, let tabTitles, let tabGroupToken):
             return discoveryLanded(&state, wid: wid, accepted: accepted, newlyTracked: newlyTracked,
                 adoptedAsInactiveTab: adoptedAsInactiveTab, queriedSpaceIds: queriedSpaceIds,
-                isOrderedIn: isOrderedIn, tabTitles: tabTitles)
-        case .titleAndTabsRead(let wid, let tabTitles, let reconcileTabs, let changedSoFar):
-            return titleAndTabsRead(&state, wid: wid, tabTitles: tabTitles, reconcileTabs: reconcileTabs,
-                changedSoFar: changedSoFar)
-        case .axFocusedWindowRead(let wid, let viaActivationBackstop):
-            return axFocusedWindowRead(&state, wid: wid, viaActivationBackstop: viaActivationBackstop)
+                isOrderedIn: isOrderedIn, tabTitles: tabTitles, tabGroupToken: tabGroupToken)
+        case .titleAndTabsRead(let wid, let tabTitles, let tabGroupToken, let reconcileTabs, let changedSoFar):
+            return titleAndTabsRead(&state, wid: wid, tabTitles: tabTitles, tabGroupToken: tabGroupToken,
+                reconcileTabs: reconcileTabs, changedSoFar: changedSoFar)
+        case .axFocusedWindowRead:
+            return []
         case .altTabFocusedWindowInFrontmostApp:
             // Our own switch into the app that is already frontmost. It names its target, so it reaches the
             // order through `AttentionDriver` like every other namer.
@@ -157,7 +157,7 @@ enum WindowEventReducer {
             // verdict). Logged with its reason so a capture says WHICH path condemned it.
             return state.window(wid) != nil
                 ? [.log(state.removalLog(wid, reason: "axElementDead")), .removeWindow(wid)]
-                    + refrontAfterRemovingTheFocusedWindow(&state, wid: wid)
+                    + refrontAfterFocusedWindowBecomesUnavailable(&state, wid: wid)
                 : []
         case .cgsWindowListsRead(let visible, let all):
             return cgsWindowListsRead(&state, visible: visible, all: all)
@@ -182,9 +182,9 @@ enum WindowEventReducer {
     /// query/200ms. An order-in also re-reads kAXMinimized (de-minimize has no dedicated WS event) but does
     /// NOT reconcile tabs: an order-in during a fullscreen or Space transition reports the AXTabGroup
     /// inconsistently, and a transient empty read would dissolve the group and strand its inactive tabs as
-    /// phantoms (the fullscreen-tab disappearance). Untracked → a window is created at 0x0 and sized a beat
-    /// later, so the create-time discovery rejects it on the min-size filter; its first move/resize/
-    /// ordered-in is the signal it now has real geometry → discover it right then (coalesced; idempotent).
+    /// phantoms (the fullscreen-tab disappearance). Untracked → mutable physical or semantic evidence may
+    /// now make the surface admissible, so discover it again (coalesced; idempotent). Standard and main
+    /// windows do not wait for non-zero geometry.
     private static func movedResizedOrOrderedIn(_ state: inout TrackedWindowState, wid: CGWindowID, orderedIn: Bool,
                                                 now: TimeInterval, inSpaceTransition: Bool) -> [ReducerEffect] {
         // Consumed here whatever we decide below, and for untracked wids too, so the set stays self-draining
@@ -283,13 +283,6 @@ enum WindowEventReducer {
         [.discoverWindow(wid: wid, throttled: false)]
     }
 
-    /// The app's own answer. It reaches the order through `AttentionDriver`, which decides whose fact it is
-    /// and whether that app is the one in front, so there is nothing left to decide here.
-    private static func axFocusedWindowRead(_ state: inout TrackedWindowState, wid: CGWindowID,
-                                            viaActivationBackstop: Bool) -> [ReducerEffect] {
-        []
-    }
-
     /// Closing the window that holds MRU slot 0 hands the front to whoever held slot 1 — which can belong to
     /// a DIFFERENT app than the one still frontmost. macOS never moves focus across apps because a window
     /// closed, so re-front the frontmost app's own next window instead. Without this, a dialog that took slot
@@ -297,9 +290,10 @@ enum WindowEventReducer {
     /// front forever: every alt-tab then lands back on the window the user is already in, and nothing corrects
     /// it (a re-focus of the already-focused window of the already-frontmost app emits neither an activation
     /// nor an 808). #5346, REAPER + its "Insert Multiple Media Items" dialog.
-    private static func refrontAfterRemovingTheFocusedWindow(_ state: inout TrackedWindowState,
-                                                             wid: CGWindowID) -> [ReducerEffect] {
-        guard state.window(wid)?.lastFocusOrder == 0, let pid = state.frontmostPid else { return [] }
+    private static func refrontAfterFocusedWindowBecomesUnavailable(_ state: inout TrackedWindowState,
+                                                                    wid: CGWindowID) -> [ReducerEffect] {
+        guard let window = state.window(wid), window.lastFocusOrder == 0,
+              let pid = state.frontmostPid, window.pid == pid else { return [] }
         let successor = state.windows
             .filter { $0.wid != nil && $0.wid != wid && $0.pid == pid && !$0.isWindowlessApp
                 && !$0.isMinimized && !state.isTabbed($0) && !state.isPhantom($0) }
@@ -322,7 +316,9 @@ enum WindowEventReducer {
             target = observed
         }
         guard state.window(target) != nil else { return effects }
-        return effects + applyFocusAndBump(&state, wid: target, at: at, .attentionReducer)
+        effects += applyFocusAndBump(&state, wid: target, at: at, .attentionReducer)
+        normalizeGroupVisibility(&state, into: &effects)
+        return effects
     }
 
     /// **The one place the window order is written.** The trio every focus-bump site fires (focusedWindow +
@@ -334,9 +330,9 @@ enum WindowEventReducer {
     /// `source` says what entitles this call to write, and only two things do: an attention decision, which
     /// is the model saying the user is now looking at this window, and a structural repair, which is not a
     /// claim about the user at all (the front window closed, or a tab group changed which member it draws).
-    /// Everything else would be INFERENCE from physical events — an 808, an order-in, an activation's raise
-    /// tail — and inference is what the re-architecture removed: it is right most of the time and silently
-    /// wrong the rest, and nothing downstream can tell the two apart.
+    /// A raw physical event cannot use this as an attention claim. Physical evidence reaches it only through
+    /// a narrowly-named structural repair, where the model is preserving a replacement/representative rather
+    /// than asserting that an 808, order-in, or activation raise revealed key focus.
     private static func applyFocusAndBump(_ state: inout TrackedWindowState, wid: CGWindowID,
                                           at: TimeInterval? = nil,
                                           _ source: AttentionWriteSource) -> [ReducerEffect] {
@@ -347,7 +343,9 @@ enum WindowEventReducer {
             effects.append(.removeWindowlessPlaceholder(pid: pid))
         }
         let changed = state.noteFocus(wid, at: at ?? state.now)
-        effects.append(.refreshUi(wids: changed, onlyWhileSwitcherOpen: false))
+        effects.append(source == .attentionReducer
+            ? .refreshUiImmediately(wids: changed)
+            : .refreshUi(wids: changed, onlyWhileSwitcherOpen: false))
         return effects
     }
 
@@ -450,6 +448,7 @@ enum WindowEventReducer {
                 state.carried.untrackedJoinedSpace[wid] = spaceId
                 state.carried.lastUntrackedSpaceJoinWid = wid
                 state.carried.lastUntrackedSpaceJoinAt = now
+                armInheritanceAfterJoin(&state, joiner: wid)
                 if state.visibleSpaces.contains(spaceId) {
                     state.pendingFocusPromotion[wid] = .asserted
                     state.carried.lastUntrackedVisibleSpaceJoinAt = now
@@ -595,10 +594,11 @@ enum WindowEventReducer {
             // machine can take seconds to size the new window). See `.holdReleaseCheck`.
             effects.append(.scheduleHoldReleaseCheck(wid: wid, attempt: 0))
         }
-        // A tab SWITCH emits no focus event at all — just this Space swap (1325 for the tab coming
-        // on-screen, 1326 for the one leaving). Pre-migration the AX focused-window notification fired for
-        // it; 808 never does. So an inactive tab joining a Space while its app is frontmost IS the focus
-        // signal, and we bump the MRU here or the switcher shows a stale order after clicking another tab.
+        // The Space swap is the physical fallback for selecting a tab representative (1325 for the tab
+        // coming on-screen, 1326 for the one leaving). The app-level AX observer normally names the same tab,
+        // but it may be delayed or absent while the WindowServer state is already visible. Repair the group's
+        // representative here when an inactive tab joins the front app's Space; an eventual AX answer is
+        // idempotent.
         // Read `isTabbed` BEFORE reconcile flips it, and bump OUTSIDE the delta guard: the tab machinery
         // backfills a background tab's spaceIds from its active sibling, so the 1325 add is usually a
         // no-op delta (`applySpaceMembershipDelta` returns false).
@@ -607,7 +607,7 @@ enum WindowEventReducer {
         // so the AX-title match names nothing and geometry sees different positions — the tab sits tracked,
         // Space-less and ordered-out, linked to no one. Switching to it then failed this gate, no bump was
         // written, and the group (formed a beat later, once the tab was on-screen and readable) re-elected
-        // the tab the user had just LEFT as the one it draws (T-19). Space-less and not ordered-in is what
+        // the tab the user had just LEFT as the one it draws. Space-less and not ordered-in is what
         // "background tab" means physically, so take that as the second arm.
         let wasOffScreenTab = !window.isOrderedIn && window.spaceIds.isEmpty && state.visibleSpaces.contains(spaceId)
         let inactiveTabBecameActive = added && (isTabbedBefore || wasOffScreenTab)
@@ -674,6 +674,16 @@ enum WindowEventReducer {
         return effects
     }
 
+    /// The leave-first half of a tab handover. The outgoing representative is already held when the
+    /// untracked successor joins, and the exact handover edge names the group it must inherit. The
+    /// join-first half is armed in the tracked leave branch above. The hold is the freshness gate; unlike a
+    /// fullscreen flag it is present on both sides of the transition and is not mirrored between tabs.
+    private static func armInheritanceAfterJoin(_ state: inout TrackedWindowState, joiner: CGWindowID) {
+        guard let edge = state.carried.pendingHandoverEdge[joiner], edge.pendingSideJoined,
+              state.held.contains(edge.partnerWid) else { return }
+        state.carried.pendingGroupInheritance[joiner] = state.groups.siblingWids(of: edge.partnerWid) ?? [edge.partnerWid]
+    }
+
     /// Re-read the AXTabGroup of an app's ON-SCREEN (non-tabbed, Space-holding) windows right when a
     /// Space-membership event signals a tab change, so the tab state reconciles NOW instead of waiting for
     /// the next switcher show (was `Applications.reconcileTabsForAppOnSpaceEvent` — see its comment there
@@ -700,8 +710,8 @@ enum WindowEventReducer {
     private static func spaceTransitionStarted(_ state: inout TrackedWindowState) -> [ReducerEffect] {
         // Deliberately NO `.refreshUi`. Repainting here looks free and is not: `refreshOpenUiAfterExternalEvent`
         // is throttled at 200ms with a leading edge, so a repaint fired the instant the Space flips SPENDS that
-        // edge, and the update that actually matters — the arriving Space's focus 808, which lands 14-67ms
-        // later (measured) and re-orders the tiles — then waits out the tail. Live capture, switcher open
+        // edge, and the update that actually matters — the semantic focus answer following the Space change
+        // — then waits out the tail. Live capture, switcher open
         // across the transition: repainting here pushed the MRU correction from ~15ms to 220ms after the
         // summon. The topology write below is what the leading edge is for; the repaint it feeds is the
         // settled pass's job, 250ms later, exactly as before.
@@ -722,12 +732,11 @@ enum WindowEventReducer {
 
     /// An app became frontmost (NSWorkspace — no WS equivalent). It names an app and nothing else: the 808s
     /// macOS emits alongside it fire once per on-Space window, which is a set rather than an answer, so which
-    /// window the user landed on can only come from the app. Ask it, through the bounded `kAXFocusedWindow`
-    /// read; `AttentionModel` decides whether that answer is worth anything by the time it arrives.
-    private static func appActivated(_ state: inout TrackedWindowState, pid: pid_t, now: TimeInterval,
-                                     altTabTargetWid: CGWindowID?) -> [ReducerEffect] {
+    /// window the user landed on can only come from the app. `AttentionModel` reuses that app's last answer,
+    /// or requests one bounded `kAXFocusedWindow` read when it has no answer yet.
+    private static func appActivated(_ state: inout TrackedWindowState, pid: pid_t) -> [ReducerEffect] {
         state.frontmostPid = pid
-        return [.bumpFocusViaAxBackstop(pid: pid)]
+        return []
     }
 
     // MARK: - async read results landing
@@ -739,23 +748,22 @@ enum WindowEventReducer {
     private static func discoveryLanded(_ state: inout TrackedWindowState, wid: CGWindowID, accepted: Bool,
                                         newlyTracked: Bool, adoptedAsInactiveTab: Bool,
                                         queriedSpaceIds: [UInt64], isOrderedIn: Bool,
-                                        tabTitles: [String]?) -> [ReducerEffect] {
-        // A REJECTED wid the OS has just CREATED is not a dead wid: the OS publishes a window — and every new
-        // tab — at 0×0 and sizes it a beat later, so the create-time discovery is rejected on the min-size
-        // filter and the SAME wid comes back through its first move/resize, accepted (`.windowCreated` says
-        // so itself). Everything below CONSUMES this wid's pending state, so letting that throwaway landing
-        // run spends it on a discovery that never happened.
+                                        tabTitles: [String]?, tabGroupToken: TabGroupToken?) -> [ReducerEffect] {
+        // A not-yet-admitted wid the OS has just CREATED is not a dead wid. A custom AXWindow root can be
+        // published without enough geometry or semantics to admit it, then become admissible on its first
+        // move/resize. Everything below CONSUMES this wid's pending state, so a latent landing must not spend
+        // it on a discovery that never happened.
         //
         // It is the handover edge that pays. Live #5785 capture, opening the first tab in a Terminal window:
         // `windowCreated #4131` → the 1325/1326 pair records the edge naming the tab it replaced (#4125) →
-        // the 0×0 landing eats it 8ms later → the real landing 211ms after that inherits nothing. The new tab
+        // a latent landing eats it 8ms later → the real landing 211ms after that inherits nothing. The new tab
         // then forms no group, and neither of the other two paths can fill in: the tab bar grows the window
         // (1017×610 against the outgoing tab's 1017×565) so geometry has no cluster, and Terminal composes
         // tab titles unlike window titles so `matchSiblings` names nobody. Two tiles for one window, until
         // the hold hit its 20s cap. Nothing else drains on this path (destroy, and the untracked-Space leave
         // that marks a supersede, both still do), so deferring to the real landing loses no anti-leak cover.
         guard accepted || !state.recentlyCreated.contains(wid) else { return [] }
-        // Consume the pending-removal marker up-front, so a window rejected by the discriminator can't
+        // Consume the pending-removal marker up-front, so a surface rejected by admission can't
         // leave it dangling — the set stays self-draining. `pendingSpaceRemoval` remembers a
         // removed-from-Space event that arrived while the window was still untracked (a rapid-burst
         // background tab, #5830).
@@ -768,8 +776,8 @@ enum WindowEventReducer {
         let wasRemovedFromSpaceWhileUntracked = removedFromSpaceWhileUntracked.map { left in
             queriedSpaceIds.isEmpty || queriedSpaceIds == [left]
         } ?? false
-        // ...and the same self-draining logic for the two maps the HANDOVER fills. A wid the discriminator
-        // REJECTED is never becoming a window, and `accepted: false` is the only moment we learn that for
+        // ...and the same self-draining logic for the two maps the HANDOVER fills. A wid admission currently
+        // rejects is not becoming a destination, and `accepted: false` is the only moment we learn that for
         // certain: the other drains all hang off events that may never come. Finder's 804 "lags a real close
         // by seconds — or never fires" for apps that retain the CGWindow, and a wid that joined a NON-visible
         // Space is never even scheduled for discovery, so without this the entries wait forever. That is the
@@ -811,11 +819,11 @@ enum WindowEventReducer {
             // the Space-join to be applied here, when the wid finally becomes a window. It is a structural
             // repair by definition: membership already changed, and this only settles which member is drawn.
             //
-            // A window merely being BORN is not promoted, which is the deliberate half (WL-02, twenty
-            // background windows; WL-03, a launch finishing after the user had moved on). The app's own
+            // A window merely being BORN is not promoted, which is the deliberate half (twenty background
+            // windows at once; a launch finishing after the user had moved on). The app's own
             // focused-window notification names a new window when it really did take keys, and that is a
             // namer; nothing here has to guess. The price is known and was accepted: a window that never took
-            // keys has no attention record, so it sorts behind every window the user has ever focused (S-02).
+            // keys has no attention record, so it sorts behind every window the user has ever focused.
             justCreated = state.recentlyCreated.contains(wid)
             // A handover edge recorded while this wid was still untracked — the minted half of a tab switch —
             // can only be applied now, and the pid it was missing is finally readable. BEFORE the promotion
@@ -829,8 +837,8 @@ enum WindowEventReducer {
                 switch state.pendingFocusPromotion.removeValue(forKey: wid) {
                 // The assertion is armed by a join of the visible Space. For a REUSED wid, arriving with no
                 // create event, that can only be saying "the user switched to me". A window being BORN joins
-                // that same Space though, so every birth was fronted too, whatever the user was doing (WL-02,
-                // twenty background windows; WL-03, a launch finishing after the user had moved to Finder).
+                // that same Space though, so every birth was fronted too, whatever the user was doing (twenty
+                // background windows at once; a launch finishing after the user had moved to Finder).
                 // So a created wid keeps the promotion only when it took another window's place, which is
                 // what a new tab does and what a new window does not. A created tab that forms its group
                 // later is bumped by the `justCreated` branch below instead.
@@ -879,7 +887,7 @@ enum WindowEventReducer {
             // group, so `matchSiblings` may claim the previous active tab even before its "removed from
             // Space" event lands — grouping the pair atomically so the old tab never flashes as a 2nd tile.
             // It must be newly CREATED, not merely newly tracked (the "void" trap — see above).
-            let r = updateTabState(&state, activeWid: wid, siblingTitles: tabTitles,
+            let r = updateTabState(&state, activeWid: wid, siblingTitles: tabTitles, tabGroupToken: tabGroupToken,
                 activeIsNewlyDiscovered: newlyTracked && wasJustCreated)
             effects.append(contentsOf: r.effects)
             tabStateChanged = r.changed
@@ -1004,7 +1012,8 @@ enum WindowEventReducer {
     /// reports whether they changed): the tab reconcile and the re-render decision. Minimized is NOT here —
     /// it comes from the WindowServer query, which cannot be blocked by the window's own app.
     private static func titleAndTabsRead(_ state: inout TrackedWindowState, wid: CGWindowID, tabTitles: [String]?,
-                                         reconcileTabs: Bool, changedSoFar: Bool) -> [ReducerEffect] {
+                                         tabGroupToken: TabGroupToken?, reconcileTabs: Bool,
+                                         changedSoFar: Bool) -> [ReducerEffect] {
         guard state.window(wid) != nil else { return [] }
         var effects = [ReducerEffect]()
         var changed = changedSoFar
@@ -1013,11 +1022,11 @@ enum WindowEventReducer {
         var tabCountMoved = false
         if reconcileTabs { tabCountMoved = recordTabCount(&state, wid: wid, tabTitles: tabTitles) }
         if reconcileTabs, tabTitles != nil || state.groups.siblingWids(of: wid) != nil {
-            let r = updateTabState(&state, activeWid: wid, siblingTitles: tabTitles)
+            let r = updateTabState(&state, activeWid: wid, siblingTitles: tabTitles, tabGroupToken: tabGroupToken)
             effects.append(contentsOf: r.effects)
             // ...or the COUNT moved, even when nothing else did. The count is a fact only this read supplies
             // and only geometry consumes (`TabGroupResolver.tabCountAccountsForEveryMember`), and it lands
-            // AFTER the events that last ran geometry: measured on a Merge All Windows (T-05/T-04, live
+            // AFTER the events that last ran geometry: measured on a Merge All Windows (live
             // 2026-07-30), the tabs' three 1326s reconciled at 19:40:50.477 while `tabCount` was still 0, and
             // the read that set it to 4 landed at 19:40:50.488 — eleven milliseconds too late, with nothing
             // left to re-ask. `updateTabState` reports `changed: false` there (it matched nobody: same title,
@@ -1046,6 +1055,7 @@ enum WindowEventReducer {
     private static func windowServerStateRead(_ state: inout TrackedWindowState, _ snapshots: [WsWindowSnapshot]) -> [ReducerEffect] {
         var changedAny = false
         var toCapture = [CGWindowID]()
+        var focusRepairs = [ReducerEffect]()
         for snap in snapshots {
             guard let i = state.windowIndex(snap.wid) else { continue }
             var changed = state.windows[i].position != snap.position || state.windows[i].size != snap.size
@@ -1070,6 +1080,9 @@ enum WindowEventReducer {
                !snap.isMinimized || state.carried.offScreen.contains(snap.wid) {
                 state.windows[i].isMinimized = snap.isMinimized
                 changed = true
+                if snap.isMinimized {
+                    focusRepairs += refrontAfterFocusedWindowBecomesUnavailable(&state, wid: snap.wid)
+                }
             }
             if changed {
                 changedAny = true
@@ -1077,7 +1090,7 @@ enum WindowEventReducer {
             }
         }
         guard changedAny else { return [] }
-        var effects = reconcile(&state)
+        var effects = focusRepairs + reconcile(&state)
         effects.append(.refreshUi(wids: toCapture, onlyWhileSwitcherOpen: true))
         return effects
     }
@@ -1275,30 +1288,48 @@ enum WindowEventReducer {
         let candidateWids = Set(candidates.compactMap { $0.wid })
         for group in TabGroupResolver.geometryGroups(candidates.map { state.tabWindow($0) }, newlyDiscovered: newlyDiscovered) {
             guard candidateWids.contains(group.visibleWid) else { continue }
-            let background = group.backgroundWids.filter { candidateWids.contains($0) }
+            // **Geometry may not take a member away from a group that already has its own visible tab.**
+            // Position is the only fact separating two same-size windows, and it is not always that window's
+            // own: rec28 measured a background tab of one Finder window reporting the ORIGIN of the other —
+            // not a stale frame of its own, a frame that was never its. Geometry then put it in the wrong
+            // partition, and the membership union pulled its whole group across: six windows in one group
+            // under a representative declaring three tabs, five of them undrawn.
+            //
+            // A window whose established group still has an on-screen representative is spoken for by
+            // evidence geometry does not have — the AX tab titles of that representative's own AXTabGroup —
+            // so a frame is not enough to move it. Ungrouped members, and members of the representative's
+            // own group, are untouched: that is every case geometry legitimately decides.
+            let background = group.backgroundWids.filter { wid in
+                guard candidateWids.contains(wid) else { return false }
+                guard let existing = state.groups.groupId(of: wid),
+                      existing != state.groups.groupId(of: group.visibleWid),
+                      let rep = state.groups.representativeByGroup[existing], rep != wid,
+                      let repWindow = state.window(rep), !repWindow.spaceIds.isEmpty else { return true }
+                return false
+            }
             guard !background.isEmpty else { continue }
             // Geometry's view is PARTIAL: its candidates exclude minimized / size-less windows, so a member
             // it can't see is NOT evidence of departure (absence of a signal, not a signal of absence —
             // unlike the AX-titles path, whose kept-rule accounts for every member). Union the geometry
             // group with the existing memberships of its members, so re-linking a subset never drops the
             // unseen rest of the group.
-            var wids = group.siblingWids
-            for w in group.siblingWids {
+            var wids = [group.visibleWid] + background
+            for w in wids {
                 for m in state.groups.siblingWids(of: w) ?? [] where !wids.contains(m) { wids.append(m) }
             }
             let formed = state.formGroup(wids, representative: group.visibleWid, reason: "geometry")
             effects.append(contentsOf: formed.logs.map { .log($0) })
             // The tab the user just SWITCHED TO is the member geometry elected as visible from the
-            // `newlyDiscovered` signal. A fullscreen window's switch to a REUSED background wid emits no
-            // focus event AltTab can see (no 808; the wid was untracked when it joined the Space, so the
-            // `joinedSpace` bump and `pendingFocusPromotion` never armed for it), so nothing has fronted it
-            // — and `.track` lands it at the BACK of the MRU. Left un-bumped, `normalizeGroupVisibility`'s
+            // `newlyDiscovered` signal. A fullscreen window's switch to a REUSED background wid can reach
+            // physical discovery with no promotion attached (the wid was untracked when it joined the Space,
+            // so the `joinedSpace` bump and `pendingFocusPromotion` never armed for it), and `.track` lands it
+            // at the BACK of the MRU. Left un-bumped, `normalizeGroupVisibility`'s
             // focus-order representative pick keeps a still-tracked sibling that was focused more recently
             // (the outgoing tab, or a background tab) as the tile, so the switcher shows the WRONG tab until
             // that stale sibling is ordered out on the next close ("switched to Movies, opened the switcher,
             // it didn't update; reopening fixed it"). Bump it here, at discovery, exactly as
             // `groupRepresentative`'s contract assumes ("the new tab is bumped at discovery"). Idempotent:
-            // if a focus signal already fronted it, `noteFocus` no-ops.
+            // if the AX attention answer already fronted it, `noteFocus` no-ops.
             if group.visibleWid == newlyDiscovered {
                 effects.append(.log("bumpElectedVisible #\(group.visibleWid) (newlyDiscovered took over group)"))
                 effects += applyFocusAndBump(&state, wid: group.visibleWid, at: state.now, .structuralRepair)
@@ -1449,6 +1480,7 @@ enum WindowEventReducer {
     }
 
     static func updateTabState(_ state: inout TrackedWindowState, activeWid: CGWindowID?, siblingTitles: [String]?,
+                               tabGroupToken: TabGroupToken? = nil,
                                activeIsNewlyDiscovered: Bool = false) -> (changed: Bool, effects: [ReducerEffect]) {
         var effects = [ReducerEffect]()
         var changed = false
@@ -1471,6 +1503,10 @@ enum WindowEventReducer {
         }
         guard let activeWid, let active = state.window(activeWid) else { return (changed, effects) }
         let pid = active.pid
+        // BEFORE the projection, so this read's own token is what the kernel compares against. Recorded on
+        // every read that names a tab group, which is how membership accrues: each tab hands out the same
+        // element as it becomes selected, so the group learns its members from the user simply using them.
+        state.groups.recordToken(tabGroupToken, for: activeWid)
         let sameApp = state.windows.filter { $0.pid == pid && $0.wid != nil }
         let match = TabGroupResolver.matchSiblings(active: state.tabWindow(active), axTitles: titles,
             sameAppWindows: sameApp.map { state.tabWindow($0) }, activeIsNewlyDiscovered: activeIsNewlyDiscovered)
@@ -1529,7 +1565,7 @@ enum WindowEventReducer {
                 changed = true
             }
         }
-        effects.append(.log("updateState active#\(activeWid)\(activeIsNewlyDiscovered ? " NEW" : "") titles=\(titles) matched=\(match.matchedWids) untracked=\(match.untrackedTitles) untab=\(match.toUntabWids)\(titlesNamedNothing ? " namedNothing keptGroup" : "") changed=\(changed)"))
+        effects.append(.log("updateState active#\(activeWid)\(activeIsNewlyDiscovered ? " NEW" : "") tok=\(tabGroupToken.map(String.init) ?? "-") titles=\(titles) matched=\(match.matchedWids) untracked=\(match.untrackedTitles) untab=\(match.toUntabWids)\(titlesNamedNothing ? " namedNothing keptGroup" : "") changed=\(changed)"))
         return (changed, effects)
     }
 }

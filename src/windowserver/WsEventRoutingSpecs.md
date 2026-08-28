@@ -19,7 +19,7 @@ focused/front window changed (confirmed cross-app and intra-app)**, 1325/1326 ad
   `refreshVisibility`, after which `WsWindowState` reads the minimized bit.
 - **Space notifications (1325/1326) carry `(spaceId, wid)` in the payload** — membership is free, no query.
 - **Created (811) ⇒ `acquireAndDiscriminate`** — the wid may be untracked; we must obtain its AX element
-  and run `WindowDiscriminator` before showing it.
+  and run `WindowAdmissionResolver` before showing it.
 
 ## Test scenarios
 

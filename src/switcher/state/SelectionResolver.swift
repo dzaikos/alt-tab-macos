@@ -46,20 +46,8 @@ struct SelectionInputs: Equatable {
     /// app), and then the front tile IS the window you were on before and stepping over it lands one tile too
     /// far (#5941).
     ///
-    /// Answered of the APP by `SelectionResolver.currentWindowIsDrawn` — "is a window of the frontmost app
-    /// that COULD be the current one being kept out of the list" — not of the window. The strict question
-    /// reads the AX `focusedWindow`, which can be stale or nil, and answering it `false` while the user's
-    /// window sits right there at tile 0 selects the window they are already on: a worse bug than the one
-    /// being fixed. Windows that cannot be the one on screen (a windowless placeholder, a phantom, a
-    /// minimized window) are the only ones skipped, so an app that owns none of them is left to the ordinary
-    /// rule (#5960).
-    ///
-    /// So the answer is exact for the filters that exclude a whole APP, and coarser than the truth for the
-    /// two that can exclude the current window while a SIBLING window of the same app stays drawn (`Spaces
-    /// to show: other Spaces`, `Screens to show: screen showing AltTab`). Those keep the old overshoot,
-    /// unchanged. Closing that too needs per-window identity, and the cheap version of it — the frontmost
-    /// app's lowest-`lastFocusOrder` window — lands on the current window itself in the grouped-tab case
-    /// `secondVisibleIndex` documents, where a hidden tab holds rank 0 and the current window sits behind it.
+    /// Answered exactly when attention names a window. App-only and unknown attention retain the conservative
+    /// app-wide rule: guessing `false` while the user's window is drawn selects the window they are already on.
     ///
     /// Defaults to `true`: the ordinary case, and what every scenario written before #5941 assumes.
     var currentWindowIsDrawn = true
@@ -71,6 +59,12 @@ struct FrontmostAppWindow: Equatable {
     let isWindowlessApp: Bool
     let isPhantom: Bool
     let isMinimized: Bool
+}
+
+enum CurrentWindowDrawEvidence: Equatable {
+    case exactWindow(isDrawn: Bool)
+    case application([FrontmostAppWindow])
+    case unknown
 }
 
 /// What the kernel recommends. Wrapper translates this into side effects (highlight redraws,
@@ -239,6 +233,14 @@ enum SelectionResolver {
         let candidates = frontmostAppWindows.filter { !$0.isWindowlessApp && !$0.isPhantom && !$0.isMinimized }
         guard !candidates.isEmpty else { return true }
         return candidates.contains { $0.visible }
+    }
+
+    static func currentWindowIsDrawn(_ evidence: CurrentWindowDrawEvidence) -> Bool {
+        switch evidence {
+        case .exactWindow(let isDrawn): return isDrawn
+        case .application(let windows): return currentWindowIsDrawn(windows)
+        case .unknown: return true
+        }
     }
 
     /// Find the user's chosen window by id, returning its current index if visible.

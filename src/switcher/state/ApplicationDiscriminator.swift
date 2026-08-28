@@ -1,13 +1,19 @@
 class ApplicationDiscriminator {
-    static func isActualApplication(_ processIdentifier: pid_t, _ bundleIdentifier: String?) -> Bool {
+    static func isActualApplication(_ processIdentifier: pid_t, _ bundleIdentifier: String?,
+                                    evidence: ApplicationAdmissionEvidence = .discovery) -> Bool {
         // an app can start with .activationPolicy == .prohibited, then transition to != .prohibited later
         // an app can be both activationPolicy == .accessory and XPC (e.g. com.apple.dock.etci)
-        guard isNotXpc(processIdentifier) || isPasswords(bundleIdentifier) || isAndroidEmulator(bundleIdentifier, processIdentifier) else {
-            Logger.debug { logTemplate("XPC process", processIdentifier, bundleIdentifier) }
+        let isZombie = processIdentifier.isZombie()
+        guard !isZombie else {
+            Logger.debug { logTemplate("zombie process", processIdentifier, bundleIdentifier) }
             return false
         }
-        guard !processIdentifier.isZombie() else {
-            Logger.debug { logTemplate("zombie process", processIdentifier, bundleIdentifier) }
+        let isXpc = !isNotXpc(processIdentifier)
+        let isKnownUserFacingException = isXpc && (isPasswords(bundleIdentifier)
+            || isAndroidEmulator(bundleIdentifier, processIdentifier))
+        guard ApplicationAdmissionResolver.accepts(isXpc: isXpc, isZombie: false,
+                  isKnownUserFacingException: isKnownUserFacingException, evidence: evidence) else {
+            Logger.debug { logTemplate("XPC process without attention", processIdentifier, bundleIdentifier) }
             return false
         }
         Logger.debug { logTemplate(nil, processIdentifier, bundleIdentifier) }

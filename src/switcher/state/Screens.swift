@@ -42,17 +42,14 @@ extension NSScreen {
     ///   * if NSScreen.screensHaveSeparateSpaces == false, and key window is on another screen than screens[0], it still returns screens[0]
     /// we find the screen with the key window ourselves manually
     static func active() -> NSScreen? {
-        guard let frontmostPid = Applications.frontmostPid,
-              // we avoid Applications.findOrCreate() here, because it active() is called very early during launch
-              // we are not ready to create applications yet
-              let frontmostApp = (Applications.list.first { $0.pid == frontmostPid }) else { return nil }
-        guard let focusedWindow = frontmostApp.focusedWindow else { return NSScreen.withActiveMenubar() }
+        guard case .window(let identity) = AttentionEngine.currentUserContext,
+              let focusedWindow = Windows.byWindowId[identity.wid] else { return NSScreen.withActiveMenubar() }
         // Read the focused window's cached screen rather than refreshing it here: this runs on the show
         // path (NSScreen.updatePreferred), and updateSpacesAndScreen() does a synchronous CGS call (#5721).
         // The screen is kept fresh off-main on focus events and by Applications.syncSpacesState; the only
         // cost is a possibly-wrong active screen on the very first summon of a never-yet-resolved window.
-        guard let screenId = focusedWindow.screenId else { return nil }
-        return Screens.all[screenId]
+        guard let screenId = focusedWindow.screenId else { return NSScreen.withActiveMenubar() }
+        return Screens.all[screenId] ?? NSScreen.withActiveMenubar()
     }
 
     /// there is only 1 active menubar. Other screens will show their menubar dimmed

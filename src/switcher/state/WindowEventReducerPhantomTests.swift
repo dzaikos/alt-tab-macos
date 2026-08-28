@@ -145,10 +145,11 @@ final class WindowEventReducerPhantomTests: XCTestCase {
 
     // MARK: - D. The same, for the window a reopened app comes back to (#5849, second report)
 
-    /// Reopening Slack from the Dock reaches the front through the ACTIVATION, and that activation emits no
-    /// 808 for the window — the app's own answer is the only signal. It used to bump the MRU straight from
-    /// the shell, so the latch survived: summoning the switcher 130 ms later hid the window the user was
-    /// looking at while it held slot 0, and the default pick skipped past the previous window onto a third
+    /// Reopening Slack from the Dock reaches the front through an activation that names only the process.
+    /// The attention model uses Slack's cached answer or requests one bounded focused-window read. That answer
+    /// used to bump the MRU straight from the shell, so the latch survived: summoning the switcher 130 ms
+    /// later hid the window the user was looking at while it held slot 0, and the default pick skipped past
+    /// the previous window onto a third
     /// app (System Settings, in the capture).
     func testTheReopenedWindowsLatchIsCleared() {
         var s = state([slackWindow(latchedPhantom: true, lastFocusOrder: 1), otherAppWindow(order: 0)],

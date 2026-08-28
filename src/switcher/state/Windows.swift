@@ -3,17 +3,16 @@ import Cocoa
 class Windows {
     static var list = [Window]()
     private(set) static var byWindowId = [CGWindowID: Window]()
-    /// wids that received a focus signal (an 808, a visible-Space join, an in-app raise) while still
-    /// untracked, with the time it happened. `.discoveryLanded` consumes it to place the window at the MRU
-    /// position that time earns — so a freshly-focused window (one of many from spamming cmd-N, or an app
-    /// re-showing a window it had hidden) is neither stranded at the back nor wrongly given a front the user
-    /// has since left. Cleared on destroy/removal. See `TrackedWindowState.FocusPromotion`.
+    /// wids that received physical promotion evidence (a visible-Space join or an order-in in the front app)
+    /// while still untracked, with the time it happened. `.discoveryLanded` consumes it as structural repair,
+    /// so a rediscovered tab or re-shown window is neither stranded at the back nor wrongly given a front the
+    /// user has since left. Cleared on destroy/removal. See `TrackedWindowState.FocusPromotion`.
     static var windowsPendingFocusPromotion = [CGWindowID: TrackedWindowState.FocusPromotion]()
     /// **Wids the WindowServer said were BORN, as opposed to reused.** A create event (811) is the only thing
     /// that tells the two apart, and the difference decides whether an arrival may take the front: a wid that
     /// joins the visible Space with no create is a tab switch minting nothing, so the user went there, while a
     /// wid that was born joins that same Space just by existing. Reading the join as attention fronted every
-    /// new window whatever the user was doing (WL-02, twenty background windows; WL-03, a launch finishing
+    /// new window whatever the user was doing (twenty background windows at once; a launch finishing
     /// after the user had moved on), so `discoveryLanded` keeps the promotion for a created wid only when it
     /// took another window's place. A window that really did take keys is fronted by its app's own answer, not
     /// from here. Also gates tab-grouping's `activeIsNewlyDiscovered`. Cleared on focus, destroy and removal.
@@ -111,18 +110,26 @@ class Windows {
     }
 
     static func refreshWhichWindowsToShowTheUser() {
-        if Preferences.onlyShowMainWindows() {
-            // Group windows by application and select the optimal main window
-            let windowsGroupedByApp = Dictionary(grouping: list) { $0.application.pid }
-            windowsGroupedByApp.forEach { (app, windows) in
-                if windows.count > 1, let mainWindow = findMainWindow(windows) {
-                    windows.forEach { window in
-                        if window.cgWindowId != mainWindow.cgWindowId {
-                            window.shouldShowTheUser = false
-                        }
-                    }
-                }
+        guard Preferences.showsOneWindowPerApp() else { return }
+        let current = AttentionEngine.currentUserContext
+        for (pid, windows) in Dictionary(grouping: list, by: { $0.application.pid }) {
+            let eligible = windows.filter { $0.shouldShowTheUser }
+            let currentWid = current.pid == pid ? current.wid : nil
+            let lastAttendedWid = AttentionEngine.lastAttendedWindow(pid)
+            let candidates = eligible.map {
+                ApplicationRepresentativeCandidate(id: $0.id,
+                    isCurrentAttention: $0.cgWindowId == currentWid,
+                    isLastAttention: $0.cgWindowId == lastAttendedWid,
+                    isMainWindow: $0.isMainWindow, lastFocusOrder: $0.lastFocusOrder,
+                    creationOrder: $0.creationOrder)
             }
+            let stableId = SwitcherSession.current?.representativeByPid[pid]
+            guard let representativeId = ApplicationRepresentativeResolver.pick(candidates, stableId: stableId) else { continue }
+            if stableId == nil || !candidates.contains(where: { $0.id == stableId })
+                || candidates.first(where: { $0.id == representativeId })?.isCurrentAttention == true {
+                SwitcherSession.current?.representativeByPid[pid] = representativeId
+            }
+            windows.filter { $0.id != representativeId }.forEach { $0.shouldShowTheUser = false }
         }
     }
 
@@ -146,34 +153,6 @@ class Windows {
             visibleSpaceIds: Spaces.visibleSpaces,
             exceptions: f.exceptions,
             isOnPreferredScreen: window.isOnScreen(NSScreen.preferred))
-    }
-
-    /// Selects the most appropriate main window from a given list of windows.
-    ///
-    /// The selection criteria are as follows:
-    /// 1. Prefer the focused window if it exists.
-    /// 2. Prefer the main window of the application if the focused window is not found.
-    ///
-    /// - Parameter windows: An array of `Window` objects to select from.
-    /// - Returns: The most appropriate `Window` object based on the selection criteria, or `nil` if the array is empty.
-    static func findMainWindow(_ windows: [Window]) -> Window? {
-        let sortedWindows = windows.sorted { (window1, window2) -> Bool in
-            // Prefer the focus window
-            if window1.application.focusedWindow?.cgWindowId == window1.cgWindowId {
-                return true
-            } else if window2.application.focusedWindow?.cgWindowId == window2.cgWindowId {
-                return false
-            }
-            // Prefer the main window (cached AXMain flag — refreshed off-main with the window's other
-            // attributes; avoids AX IPC in this comparator on the show path, see #5721 audit)
-            if window1.isMainWindow && !window2.isMainWindow {
-                return true
-            } else if !window1.isMainWindow && window2.isMainWindow {
-                return false
-            }
-            return true
-        }
-        return sortedWindows.first { $0.shouldShowTheUser }
     }
 
     /// selection + hover methods (all operate on `SwitcherSession.current`)
@@ -266,21 +245,22 @@ class Windows {
             currentWindowIsDrawn: currentWindowIsDrawn())
     }
 
-    /// Hands the frontmost app's own windows to `SelectionResolver.currentWindowIsDrawn`, which owns the
-    /// rule. Asked of the APP rather than of `application.focusedWindow`: that AX read can be stale or nil,
-    /// and answering `false` while the user's window IS drawn would make the default select the window they
-    /// are already on.
-    ///
-    /// No frontmost app (nothing active, or AltTab launched into an empty front) means nothing is being
-    /// filtered against it either, so the ordinary rule applies.
     private static func currentWindowIsDrawn() -> Bool {
-        guard let frontmostPid = Applications.frontmostPid else { return true }
-        return SelectionResolver.currentWindowIsDrawn(list.compactMap {
-            $0.application.pid == frontmostPid
-                ? FrontmostAppWindow(visible: shouldDisplay($0), isWindowlessApp: $0.isWindowlessApp,
-                    isPhantom: $0.isPhantom, isMinimized: $0.isMinimized)
-                : nil
-        })
+        let evidence: CurrentWindowDrawEvidence
+        switch AttentionEngine.currentUserContext {
+        case .window(let identity):
+            evidence = byWindowId[identity.wid].map { .exactWindow(isDrawn: shouldDisplay($0)) } ?? .unknown
+        case .application(let process):
+            evidence = .application(list.compactMap {
+                $0.application.pid == process.pid
+                    ? FrontmostAppWindow(visible: shouldDisplay($0), isWindowlessApp: $0.isWindowlessApp,
+                        isPhantom: $0.isPhantom, isMinimized: $0.isMinimized)
+                    : nil
+            })
+        case .unknown:
+            evidence = .unknown
+        }
+        return SelectionResolver.currentWindowIsDrawn(evidence)
     }
 
     /// Project `list` into the kernel's window view (just the fields selection needs).
@@ -474,8 +454,8 @@ class Windows {
     /// meant to rank lands ~280ms AFTER that timer, because `manuallyRefreshAllWindows` is asynchronous and
     /// `sortByLevel` was called on the line below it. So the launch guess ranked a model that was still
     /// empty, and the only call that did anything was the first-summon one — which answers after that
-    /// summon's first render, so the user watched the list re-order under them (S-12, and G-14 where it
-    /// moved the MRU front mid-hold).
+    /// summon's first render, so the user watched the list re-order under them, and in one run it
+    /// moved the MRU front mid-hold.
     ///
     /// Re-seeding per discovery settles the order while nobody is looking instead of guessing once against
     /// whatever happens to exist at one arbitrary instant. It is the same progressive-correction shape the
@@ -538,8 +518,19 @@ class Windows {
         }
     }
 
-    static func findOrCreate(_ windowAxUiElement: AXUIElement, _ wid: CGWindowID, _ app: Application, _ level: CGWindowLevel, _ title: String?, _ subrole: String?, _ role: String?, _ size: CGSize?, _ position: CGPoint?, _ isFullscreen: Bool?, _ isMinimized: Bool?, _ isMain: Bool?) -> (Window?, Bool) {
-        if let window = byWindowId[wid] ?? (list.first { $0.isEqualRobust(windowAxUiElement, wid) }) {
+    static func findOrCreate(_ windowAxUiElement: AXUIElement, _ raw: WsRawWindow, _ app: Application,
+                             _ semantic: SemanticSurface, _ isFullscreen: Bool?,
+                             _ isMinimized: Bool?) -> (Window?, Bool) {
+        let wid = raw.wid
+        let existing = byWindowId[wid] ?? (list.first { $0.isEqualRobust(windowAxUiElement, wid) })
+        let evidence = existing?.admissionEvidence ?? .discovery
+        let decision = WindowAdmissionResolver.resolve(PhysicalSurface(raw), semantic, evidence: evidence)
+        guard decision.isDestination else {
+            logAdmission(decision, raw, app)
+            if let existing { removeWindows([existing], true) }
+            return (nil, false)
+        }
+        if let window = existing {
             // Adopt the freshest element for this wid. Some apps (e.g. Zoom meeting windows) silently rebuild a
             // window's accessibility element while keeping the same CGWindowID, with no destroyed notification,
             // so our cached ref goes stale and every AX call returns kAXErrorInvalidUIElement. Rebinding here
@@ -550,42 +541,83 @@ class Windows {
             }
             // AX answered for a window that had been kept on WindowServer evidence alone.
             promoteVerified(wid)
+            window.semanticSurface = semantic
             // on any window event, we take the opportunity to refresh all window attributes
-            window.updateFromAxAttributes(title, size, position, isFullscreen, isMinimized)
+            window.updateFromAxAttributes(semantic.title, raw.bounds.size, raw.bounds.origin, isFullscreen, isMinimized)
+            logAdmission(decision, raw, app)
             return (window, false)
         }
-        guard WindowDiscriminator.isActualWindow(app, wid, level, title, subrole, role, size, isMain) else { return (nil, false) }
-        let window = Window(windowAxUiElement, app, wid, title, isFullscreen, isMinimized, position, size)
+        let window = Window(windowAxUiElement, app, wid, semantic.title, isFullscreen, isMinimized,
+            raw.bounds.origin, raw.bounds.size, .axVerified, evidence)
+        window.semanticSurface = semantic
         appendWindow(window)
+        logAdmission(decision, raw, app)
         return (window, true)
     }
 
-    /// **A window the WindowServer lists that AX could not answer for.** Tracked, not shown: the app may be
-    /// hung, quarantined, or still coming up, and the alternative — dropping the row — is how the window a
-    /// click can name by wid becomes untrackable for as long as its app stays busy.
+    /// Re-run admission when mutable AX facts change. The physical inventory keeps removed/latent surfaces
+    /// discoverable, so neither acceptance nor rejection latches for the lifetime of a WID.
+    @discardableResult
+    static func reevaluateAdmission(_ window: Window, _ semantic: SemanticSurface) -> Bool {
+        guard let wid = window.cgWindowId,
+              let raw = WindowSurfaceInventory.raw(wid) else { return true }
+        let decision = WindowAdmissionResolver.resolve(PhysicalSurface(raw), semantic,
+            evidence: window.admissionEvidence)
+        window.semanticSurface = semantic
+        logAdmission(decision, raw, window.application)
+        guard decision.isDestination else {
+            removeWindows([window], true)
+            return false
+        }
+        return true
+    }
+
+    static func reevaluatePhysicalEvidence(_ raws: [WsRawWindow]) {
+        WindowSurfaceInventory.upsert(raws)
+        for raw in raws {
+            guard let window = byWindowId[raw.wid], let semantic = window.semanticSurface else { continue }
+            _ = reevaluateAdmission(window, semantic)
+        }
+    }
+
+    private static func logAdmission(_ decision: SwitchDestinationDecision, _ raw: WsRawWindow,
+                                     _ app: Application) {
+        Logger.debug { "surface \(decision.isDestination ? "accepted" : "not admitted") \(app.debugId) wid:\(raw.wid) level:\(raw.level) parent:\(raw.parentWid) reason:\(decision.reason.rawValue)" }
+    }
+
+    /// **A window exact attention evidence named before ordinary discovery completed.** The WindowServer row
+    /// supplies physical state while AX acquisition catches up.
     ///
-    /// **Only for a window the user was demonstrably directed to.** Retaining EVERY unresolvable WindowServer
+    /// **Only for a window a click, AltTab, or an app focus notification named.** Retaining every unresolved WindowServer
     /// row was tried and reverted: a healthy app fails to resolve a wid constantly, because a background
     /// native tab exposes no AX window element at all, and tracking those made them look already-tracked to
     /// the inactive-tab brute force, which then never went looking for them. A tab group came back with one
-    /// member instead of two (D-01, D-02). Gating on "is the app unresponsive" did not save it either: at
+    /// member instead of two. Gating on "is the app unresponsive" did not save it either: at
     /// cold start apps legitimately answer `cannotComplete` for a moment and get flagged.
     ///
-    /// A click is different. It names one wid, the user just went there, and nothing else is competing to
-    /// claim that window — so representing it costs nothing even if AX never answers.
+    /// Exact attention is different. It names one wid and its pid, so representing that one row does not let
+    /// an unrelated background tab claim itself.
     ///
-    /// The criteria are otherwise WindowServer-only and strict, because nothing has vouched for this window:
-    /// it must be at an application level and big enough to be a real window.
+    /// Parentage is resolved first; the parentless surface is admitted because exact attention itself is the
+    /// behavioral evidence. Level and size cannot veto an interaction the user actually performed.
     @discardableResult
     static func findOrCreateCandidate(_ raw: WsRawWindow, _ app: Application) -> Window? {
-        if let existing = byWindowId[raw.wid] { return existing }
-        guard WindowDiscriminator.isApplicationWindow(raw),
-              raw.bounds.width >= 100, raw.bounds.height >= 50 else { return nil }
+        let representativeWid = WindowSurfaceInventory.representativeWid(raw.wid)
+        if representativeWid != raw.wid {
+            guard let representative = WindowSurfaceInventory.raw(representativeWid), representative.pid == raw.pid else { return nil }
+            return findOrCreateCandidate(representative, app)
+        }
+        if let existing = byWindowId[raw.wid] {
+            existing.admissionEvidence = .attention
+            return existing
+        }
+        let decision = WindowAdmissionResolver.resolve(PhysicalSurface(raw), nil, evidence: .attention)
+        guard decision.isDestination else { return nil }
         let window = Window(nil, app, raw.wid, raw.title.isEmpty ? nil : raw.title,
             WsWindowState.isFullscreen(raw), WsWindowState.isMinimized(raw),
-            raw.bounds.origin, raw.bounds.size, .directedCandidate)
+            raw.bounds.origin, raw.bounds.size, .attentionCandidate, .attention)
         appendWindow(window)
-        Logger.debug { "ws candidate #\(raw.wid) \(app.debugId): the user was directed to it, AX silent" }
+        logAdmission(decision, raw, app)
         return window
     }
 
@@ -597,13 +629,12 @@ class Windows {
         window.application.removeWindowlessAppWindow()
     }
 
-    /// The user was demonstrably directed to this window — a click named its wid, or AltTab focused it — so
-    /// it is shown on that evidence rather than waiting for an app that may never answer.
-    static func promoteDirected(_ wid: CGWindowID) {
-        guard let window = byWindowId[wid], !window.axStatus.isPresentable else { return }
-        window.axStatus = .directedCandidate
-        window.application.removeWindowlessAppWindow()
-        Logger.debug { "ws candidate #\(wid) promoted: the user was directed to it" }
+    /// Exact attention named this window, so it is shown on that evidence rather than waiting for AX
+    /// acquisition. This covers a click, AltTab's own target, and the app's focus notification.
+    static func promoteAttentionEvidence(_ wid: CGWindowID) {
+        let representativeWid = WindowSurfaceInventory.representativeWid(wid)
+        guard let window = byWindowId[representativeWid] else { return }
+        window.admissionEvidence = .attention
     }
 
     static func appendWindow(_ window: Window) {

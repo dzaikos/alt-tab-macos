@@ -5,16 +5,28 @@
 `TabGroupResolver` holds the pure decisions behind macOS **OS-tab** detection — deciding which windows are
 inactive tabs of one tabbed window, given the facts AltTab can read. macOS exposes no public API that maps
 an inactive tab to its window: `_AXUIElementGetWindow` on an AXTabButton returns the *parent* window's WID,
-not the tab's own, so tabs must be matched to windows **by title** (full investigation:
-`TabbedWindowDetection.swift`). Inactive tabs also appear in no CGS list, so the WindowServer-driven
+not the tab's own, so tabs must be matched to windows **by title**. Inactive tabs also appear in no CGS
+list, so the WindowServer-driven
 discovery never sees them until the user focuses one. Extracted as a pure kernel from `TabGroup` (which
 keeps the `Windows.list` reads/writes and the AX/CGS side effects) so the brittle matching is unit-testable
 without the `Window` graph. Operates on the flat `TabWindow` record — the tab analogue of `WindowState`,
 carrying the `pid` / `wid` / `size` / `position` / `tabbedSiblingWids` that grouping needs and `WindowState`
 omits.
 
-Two independent signals locate tabs, used at different times:
+Several independent signals locate tabs, used at different times:
 
+- **AX group identity** (`TabGroupToken`, the strongest) — the `AXTabGroup` element's own `AXUIElementID`,
+  read out of the same call the titles come from. Every window of a group hands out the SAME element while
+  it is the selected tab, so two windows naming it are siblings by construction: no title has to match, no
+  frame has to cluster, and nothing has to arrive within a time window. Measured across Cmd+T, tab switch,
+  drag-reorder, Merge All Windows, tear-out, a cross-group drag and fullscreen, in Finder / Terminal /
+  TextEdit. Its limits are what keep the other signals alive:
+  only the SELECTED tab exposes a tab bar at all, Terminal's and TextEdit's fullscreen bars sit in a window
+  no downward walk reaches, and the element is REPLACED by Merge All Windows and by every fullscreen
+  transition — so it is a token windows agree on while it lives, never a durable id, and a window nobody has
+  ever read as a selected tab has none. The tab BUTTONS are deliberately not used: they are rebuilt by
+  ordinary operations (Finder rebuilds all of them on one Cmd+T) and each reports the SELECTED window's wid
+  rather than its own, so a button is neither stable nor self-naming.
 - **AX titles** (`matchSiblings`) — authoritative but only available for the *active* tab (an inactive tab
   reports no AXTabGroup), read at discovery and on each show. Matches by title, so it's fragile when titles
   are dynamic (Terminal renames tabs by cwd/command) or drift between the tab-button title and the window's
@@ -99,7 +111,7 @@ Two independent signals locate tabs, used at different times:
   definition not an inactive tab; without this a new same-title window filled a title whose real tab has no
   window, Finder cmd-N). The borrow OUTLIVES the membership that justified it: leaving a group used to strip
   the lent Space, which states "CGS places this window nowhere" — the strong phantom signal — about a window
-  nobody had asked CGS about, and hid live ones (QA T-05). The marker alone keeps an orphaned ex-member from
+  nobody had asked CGS about, and hid live ones, seen live. The marker alone keeps an orphaned ex-member from
   looking on-screen, and a genuinely-gone one is turned phantom by the next `spacesSynced`. A GENUINELY-fullscreen candidate is
   ALSO never claimed (the fullscreen Space invariant: it is its own window on its own Space) — switching
   Spaces TO a fullscreen window makes it transiently Space-less, and `positionsCompatible`'s fullscreen
@@ -127,7 +139,7 @@ Two independent signals locate tabs, used at different times:
   every position rule here rests on — is simply false after Window ▸ Merge All Windows. The merged window is a
   BRAND-NEW wid one cascade step past the last of the windows it absorbed, and those keep the positions they
   had, frozen (no geometry event reaches an ordered-out tab). Measured live in Finder and Terminal alike
-  (2026-07-30 QA, T-03/T-04; the capture is `terminalMerge4Tabs`): four tabs, one shared SIZE, four positions
+  (2026-07-30 QA; the capture is `terminalMerge4Tabs`): four tabs, one shared SIZE, four positions
   29px apart. So `framePartitions` gave each tab a partition of one, no cluster survived `count > 1`, and no
   merged group could form in any app, ever — the tabs stayed Space-less and un-`isTabbed`, hence PHANTOM, so
   "separate window for each tab" showed 1 tile instead of 4 and three real windows sat exposed to the
@@ -145,7 +157,7 @@ Two independent signals locate tabs, used at different times:
     stale and a background tab's is stale by construction: only an ACTIVE tab reports an AXTabGroup, and the
     count is deliberately not retired while its window is still in a group (a nil read is transient, and
     retiring on it tore live groups apart). So a window that WAS a 3-tab active keeps `tabCount` 3 after a tab
-    is dragged out of it. Live T-05: after Move Tab to New Window, with the drag-out already correctly
+    is dragged out of it. Live: after Move Tab to New Window, with the drag-out already correctly
     confirmed, that stale 3 "accounted" for a 3-member cluster and geometry folded the torn-out window at
     (290,712) straight back into the group at (1116,683) — `group form g13 members=[72914, 72915, 72910]
     reason=geometry`. Holding a Space did not protect it: its Space was OUR annotation by then (normalize lends
@@ -323,7 +335,7 @@ and silence is not a verdict.
   in flight leaves retired wids unswept (generator seed 163, the lost thumbnail inheritance).
 - **testTabCountKeepsACascadedMergedClusterWhole** — Merge All Windows leaves every tab at its pre-merge cascade
   position, so the position split gave each its own partition and no merged group formed at all (live QA
-  2026-07-30, T-03/T-04). The visible declares as many tabs as the cluster has members, which accounts for all
+  2026-07-30). The visible declares as many tabs as the cluster has members, which accounts for all
   of them, so the cascade must not veto the cluster.
 - **testAnUnaccountedForMemberRestoresThePositionSplit** — one member more than the declared tabs and position
   goes back to separating windows. Shaped so exactness is the ONLY refusal: the visible is AX-confirmed, which
@@ -411,6 +423,29 @@ and silence is not a verdict.
   but the sibling is still tabbed into this group, so it is **kept** (not shown as a separate window) and "B2"
   is **not** reported untracked (we already hold that tab). The #5830 stability fix.
 
+### B2. matchSiblings — the group token
+
+- **testTokenClaimsSiblingNoTitleCanName** — #5785's shape (composed titles name nobody, the tab bar made the
+  frames disagree): both windows named the same `AXTabGroup` element, so the sibling is matched anyway. One
+  title is still reported untracked, and that is pre-existing accounting, not the token: when an app composes
+  tab titles unlike window titles the ACTIVE's own title is absent too, so N titles are shared by N-1
+  claimable siblings.
+- **testTokenClaimBringsTheSiblingsWholeGroup** — generator seed 18. Only the two most recent tabs had ever
+  been read as active, so only they carry a token; `form` is exact-set, so claiming just the one the token
+  reached would EJECT the third tab from the group it never left. The claim takes the whole of the group it
+  is joining, and un-tabs nobody.
+- **testTokenDoesNotClaimAnOnScreenWindow** — a token outlives the read that recorded it, so it can name a
+  window since torn out. Outside a creation the on-screen protection stands: hiding a real window is worse
+  than failing to group a tab.
+- **testNewlyDiscoveredTokenClaimsTheOutgoingTabStillOnItsSpace** — during a creation it IS claimed, the same
+  sanctioned atomic claim the size-matched second pass makes, on better evidence: here the frames disagree,
+  so only the token can do it.
+- **testAbsentTokensAreNotAMatch** — two windows nobody has ever read as a selected tab both have none, and
+  must not become siblings by both being unknown (the `nil == nil` trap).
+- **testTokenDoesNotClaimAFullscreenWindow** — entering fullscreen REPLACES the element, so a fullscreen
+  window never really shares a windowed group's token; the fullscreen Space invariant is stated here too
+  rather than assumed.
+
 ### C. positionsCompatible
 
 - **testExistingLinkBeatsFarPosition** — `b` already linked to `a` (its `tabbedSiblingWids` contains `a.wid`)
@@ -491,6 +526,16 @@ does this group show?"): a Space-join is either the group's new active tab or a 
   left with it, the group re-picks one.
 - **testAbsentSurvivorsNotCounted** — group [1, 2, 3] that already lost 3: removing 1 leaves one member →
   dissolve, not shrink.
+
+### F2. the token store (`TabGroupsTable.recordToken`)
+
+- **testNilTokenReadNeverClearsTheStoredOne** — "no token now" is routine for a window that is still a tab
+  (not selected, or a fullscreen bar the walk cannot reach), so an absence never clears: same doctrine as nil
+  titles, a group shrinks only on a positive signal.
+- **testADifferentTokenOverwrites** — a tab dragged into another window's bar keeps its element and its wid
+  and reports the DESTINATION's group from then on; overwriting is what stops the old group claiming it.
+- **testLeavingAGroupClearsTheToken** / **testDissolvingAGroupClearsEveryToken** — a token must never name a
+  window that is no longer in the group, or the next read would drag it back in.
 
 ## `lastLeftSpaceId` — history as evidence (2026-07-18)
 

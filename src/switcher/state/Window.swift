@@ -1,6 +1,8 @@
 import Cocoa
 
 @dynamicMemberLookup
+/// Live switch destination. WindowServer surfaces which are not destinations remain in
+/// `WindowSurfaceInventory`; native tabs are grouped into logical destinations by `TabGroups`.
 class Window {
     private static var globalCreationCounter = Int.zero
 
@@ -44,7 +46,7 @@ class Window {
     /// Leaving the group does NOT clear it, and does not strip the Space either. It used to: the borrow was
     /// "dropped with the membership that justified it", which wrote a fact nobody had told us — "CGS places
     /// this window nowhere" — and that is precisely the strong phantom signal, so an ungrouped window was
-    /// HIDDEN on our own guess. Live case (QA T-05): "Move Tab to New Window", the group re-forms around the
+    /// HIDDEN on our own guess. Live case: "Move Tab to New Window", the group re-forms around the
     /// other two members, and the window the user had just torn out vanished from the switcher for 515ms,
     /// until `spacesSynced` re-read the Space CGS had held for it the whole time. rec20's stray is answered
     /// by this flag alone — every claim rule reads it, with the Space still set
@@ -86,6 +88,10 @@ class Window {
     var size: CGSize?
     var screenId: ScreenUuid?
     var axUiElement: AXUIElement?
+    /// Behavioral evidence is independent from AX availability. Once exact attention names this destination,
+    /// later semantic refreshes may refine it but cannot pretend the interaction did not happen.
+    var admissionEvidence: WindowAdmissionEvidence
+    var semanticSurface: SemanticSurface?
     var application: Application
     var rowIndex: Int?
     var debugId: String!
@@ -103,16 +109,16 @@ class Window {
         set { storedState[keyPath: keyPath] = newValue }
     }
 
-    /// `axUiElement` is optional on purpose: a window the WindowServer lists but AX cannot answer for is
-    /// still a real window, and dropping it is how a hung app's window becomes untrackable. See
-    /// `AxSemanticStatus`.
-    init(_ axUiElement: AXUIElement?, _ application: Application, _ wid: CGWindowID, _ title: String?, _ isFullscreen: Bool?, _ isMinimized: Bool?, _ position: CGPoint?, _ size: CGSize?, _ axStatus: AxSemanticStatus = .axVerified) {
+    /// `axUiElement` is optional for an exact-attention destination whose app has not answered yet.
+    init(_ axUiElement: AXUIElement?, _ application: Application, _ wid: CGWindowID, _ title: String?, _ isFullscreen: Bool?, _ isMinimized: Bool?, _ position: CGPoint?, _ size: CGSize?, _ axStatus: AxSemanticStatus = .axVerified, _ admissionEvidence: WindowAdmissionEvidence = .discovery) {
         storedState = WindowState(
             id: "wid-\(wid)", isPhantom: false, isWindowlessApp: false,
             isFullscreen: false, isMinimized: false, isTabbed: false,
             isOnAllSpaces: false, spaceIds: [CGSSpaceID.max], spaceIndexes: [SpaceIndex.max],
             lastFocusOrder: .zero, creationOrder: .zero, title: "")
         self.axUiElement = axUiElement
+        self.admissionEvidence = admissionEvidence
+        semanticSurface = nil
         self.application = application
         self.axStatus = axStatus
         cgWindowId = wid
@@ -125,8 +131,7 @@ class Window {
         debugId = "\(self.application.debugId) (wid:\(cgWindowId) title:\(self.title))"
         Window.globalCreationCounter += 1
         self.creationOrder = Window.globalCreationCounter
-        // Only a window the switcher will actually draw replaces the app's placeholder icon.
-        if axStatus.isPresentable { application.removeWindowlessAppWindow() }
+        application.removeWindowlessAppWindow()
         // ensure the app's AXUIElement exists for on-demand reads + window actions (it's skipped at app init
         // for ineligible apps; having a window means the app is eligible now)
         application.ensureAxUiElement()
@@ -144,6 +149,8 @@ class Window {
             isFullscreen: false, isMinimized: false, isTabbed: false,
             isOnAllSpaces: false, spaceIds: [CGSSpaceID.max], spaceIndexes: [SpaceIndex.max],
             lastFocusOrder: .zero, creationOrder: .zero, title: "")
+        admissionEvidence = .discovery
+        semanticSurface = nil
         self.application = application
         self.title = bestEffortTitle(nil)
         Window.globalCreationCounter += 1
@@ -197,7 +204,7 @@ class Window {
     /// - otherwise `PhantomWindowDetector.syncVerdict` over the stored record: the strong signal (no Space
     ///   at all — Joplin / Sprig / `show:false` Electron) evaluated live, OR'd with the latched CGS verdict
     ///   (`storedState.isPhantom`, the only place the weak/alpha=0 case can come from — owned by
-    ///   `applyCgsPhantomVerdict`). See PhantomWindowDetection.swift (#5714).
+    ///   `applyCgsPhantomVerdict`) — see #5714.
     var isPhantom: Bool {
         if let wid = cgWindowId {
             if Windows.windowsHeldVisibleForTab.contains(wid) { return false }
@@ -401,7 +408,7 @@ class Window {
             // AltTab knows exactly which window it is focusing — record it so the coming app activation
             // bumps this window directly instead of divining the focus from a racy 808 / AX read (#5596).
             WindowServerEvents.noteAltTabInitiatedFocus(cgWindowId!, application.pid)
-            Windows.promoteDirected(cgWindowId!)
+            Windows.promoteAttentionEvidence(cgWindowId!)
             let targetMaybeCrossSpace = !self.spaceIds.isEmpty && !self.spaceIds.contains(originSpaceId)
             let originFrontPid = targetMaybeCrossSpace ? NSWorkspace.shared.frontmostApplication?.processIdentifier : nil
             BackgroundWork.accessibilityCommandsQueue.addOperation { [weak self] in
@@ -537,32 +544,26 @@ class Window {
         return nil
     }
 
-    /// Seed MRU focus order at window creation. WindowServer's focus event (808) keeps it live afterward, but
-    /// a window discovered AFTER its app was already frontmost (e.g. cold launch) never saw an 808 for it, so
-    /// read kAXFocusedWindow once and, if it points at this window, bump it to the front (#5665).
+    /// Seed the per-app focused-window fact after discovery. An app already frontmost when AltTab starts has
+    /// produced no activation or AX focus change, so `kAXFocusedWindow` is the only initial answer (#5665).
     ///
-    /// The bump is gated on the app being FRONTMOST, the same rule every focus-bump site in the reducer
-    /// applies (`windowFocused`, the order-in in-app raise). `kAXFocusedWindow` answers "which window WOULD
-    /// take keys if this app were in front", which every app has at all times — so without the gate, any
-    /// window discovered while its app sits in the BACKGROUND was fronted over the window the user is
-    /// actually on. Not hypothetical: a QQ window was swept from the model during a show and re-discovered a
-    /// beat later, and this seed put it at MRU 0 while Chrome was frontmost, so the switcher offered it as
-    /// "the window you were on before" (#5785). Read at APPLY time, not at schedule time: the AX call is
-    /// queued and was observed landing ~900ms later, by which point the frontmost app can differ.
+    /// The answer is always recorded as a fact about that process; `AttentionModel` alone decides whether the
+    /// process is frontmost when it lands. The scheduler key is per pid rather than per wid so a startup batch
+    /// does not ask the same app once for every window.
     private func checkIfFocused() {
         let app = application
         guard let appAxUiElement = app.axUiElement else { return }
-        AXCallScheduler.shared.schedule(key: "wid-\(cgWindowId)-focus", context: debugId, pid: app.pid) { [weak app] in
+        AXCallScheduler.shared.schedule(key: "pid-\(app.pid)-discovery-focus", context: debugId, pid: app.pid) { [weak app] in
             guard let app, let focusedWindow = try appAxUiElement.attributes([kAXFocusedWindowAttribute], pid: app.pid).focusedWindow else { return }
-            let focusedWid = try focusedWindow.cgWindowId()
+            let focusedWid = try focusedWindow.cgWindowId(pid: app.pid)
             DispatchQueue.main.async {
                 guard let window = (Windows.list.first { $0.isEqualRobust(focusedWindow, focusedWid) }) else { return }
-                // still worth recording WHICH window is the app's focused one: that's a per-app fact, true
-                // whether or not the app is in front, and `focusTarget` reads it when the user switches TO
-                // this app. Only the MRU bump is gated, by the reducer's `.axFocusedWindowRead`.
+                // This shell cache feeds actions and shortcut checks; the attention model independently owns
+                // whether the per-app fact moves the visible front.
                 app.focusedWindow = window
                 guard let wid = window.cgWindowId else { return }
-                TrackedWindowStateBridge.dispatch(.axFocusedWindowRead(wid: wid, viaActivationBackstop: false))
+                TrackedWindowStateBridge.dispatch(.axFocusedWindowRead(pid: app.pid, wid: wid,
+                    viaActivationRead: false))
             }
         }
     }

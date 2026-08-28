@@ -83,7 +83,7 @@ final class AxObserverHealthTests: XCTestCase {
     }
 
     /// The sparse tier doubles up to the cooldown and stays there, so an app that starts answering again is
-    /// asked within seconds instead of waiting out a flat cooldown (WL-12).
+    /// asked within seconds instead of waiting out a flat cooldown.
     func testSparseCooldownGrowsToTheCapAndStaysThere() {
         var state = state([process])
         var at: UInt64 = 0

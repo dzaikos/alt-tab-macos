@@ -18,6 +18,8 @@ enum WindowElementAcquisition {
         // Other Space: the only path is the targeted remote-token brute-force. Skipped for the current-Space
         // -only route and for our own process (always current-Space, and off-main AX on self would crash).
         guard route == .otherSpaceViaBruteForce, pid != AXUIElement.currentProcessPid else { return nil }
-        return AXUIElement.windowByBruteForce(pid, wid)
+        let result = AXUIElement.windowByBruteForce(pid, wid)
+        if result == nil { Logger.debug { "AX unavailable for physical surface (pid:\(pid) wid:\(wid))" } }
+        return result
     }
 }

@@ -201,33 +201,4 @@ final class WindowFilterResolverTests: XCTestCase {
         XCTAssertFalse(WindowFilterResolver.shouldShow(ws(isPhantom: true, isWindowlessApp: true), appState(),
                                                        hideWindowless: false, isOnPreferredScreen: true))
     }
-    // MARK: what backs the window
-
-    /// A window kept on WindowServer evidence alone is tracked, but nothing has vouched for it yet.
-    func testWsCandidateIsNotShown() {
-        var s = ws()
-        s.axStatus = .wsCandidate
-        XCTAssertFalse(WindowFilterResolver.shouldShow(s, appState(), isOnPreferredScreen: true))
-    }
-
-    /// The app is hung or gone quiet. Temporary, and still not something to offer the user unprompted.
-    func testAxUnavailableIsNotShown() {
-        var s = ws()
-        s.axStatus = .axUnavailable
-        XCTAssertFalse(WindowFilterResolver.shouldShow(s, appState(), isOnPreferredScreen: true))
-    }
-
-    func testAxRejectedIsNotShown() {
-        var s = ws()
-        s.axStatus = .axRejected
-        XCTAssertFalse(WindowFilterResolver.shouldShow(s, appState(), isOnPreferredScreen: true))
-    }
-
-    /// The user clicked it. That is evidence enough, whether or not its app ever answers.
-    func testDirectedCandidateIsShown() {
-        var s = ws()
-        s.axStatus = .directedCandidate
-        XCTAssertTrue(WindowFilterResolver.shouldShow(s, appState(), isOnPreferredScreen: true))
-    }
-
 }

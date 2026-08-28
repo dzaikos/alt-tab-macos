@@ -2,25 +2,23 @@ import Foundation
 
 /// **Attention is two facts, not one, and they come from different places.**
 ///
-/// Which app has attention comes from `NSWorkspace` and from the click's pid: it never stalls, it is never
-/// ambiguous, and it is monotonic. Which window inside that app can only come from that app, over
-/// Accessibility. The engine this replaced squeezed both into one global "current target", which is why a late
-/// answer from app X has to be reasoned about relative to app Y — five transaction statuses and six
-/// ignore-reasons exist to do that. Modelled separately, most of that arbitration stops being necessary,
-/// because a per-app fact can never take the front.
+/// Which app has attention comes from `NSWorkspace` and from the click's pid. Which window inside that app
+/// normally comes from that app, over Accessibility. Modelled separately, a late answer from app X is only a
+/// fact about X; it cannot compete with whichever process is now in front.
 ///
 ///     frontProcess                <- NSWorkspace, and the click's pid
 ///     focusedWindow[process]      <- that app's own answer, the click's wid, one bounded read
 ///     the visible front           == focusedWindow[frontProcess]
 ///
 /// The design is measured rather than reasoned: twelve focus scenarios with all four signal sources on one
-/// clock, in `~/git/alt-tab-experiments/global-focus-read/SCENARIOS.md`. What it settled, in the two lines
-/// that shape this file: **Accessibility names the window in 9 of 12 scenarios and is the earliest source in
-/// 7**, so it is the primary rather than the fallback; and **the WindowServer is never the best source in any
-/// scenario where anything else speaks, and has no exclusive scenario at all**, so 808/815 are not inputs
-/// here. There is no physical input to this reducer, deliberately.
+/// clock. What it settled, in the two lines
+/// that shape this file: **Accessibility names the window in 10 of 12 scenarios and is the earliest
+/// window-naming source in 8**, including the Space follow-up, so it is the primary rather than the fallback;
+/// and **the WindowServer is never the best source in any scenario where anything else speaks, and has no
+/// exclusive scenario at all**, so 808/815 are not attention inputs. Physical lifecycle may invalidate a
+/// cached wid, but it can never name attention.
 ///
-/// `AttentionDriver` feeds it, and its `.front` decisions are the only thing that moves the window order.
+/// `AttentionDriver` feeds it, and its `.front` decisions are the only attention-driven writes to the order.
 enum AttentionModel {
     static func reduce(_ state: inout AttentionModelState,
                        _ input: AttentionModelInput) -> AttentionModelDecision {
@@ -33,6 +31,11 @@ enum AttentionModel {
             guard isLive(state, process) else { return .ignored(.staleGeneration) }
             state.liveGenerations[process.pid] = nil
             forget(&state, process)
+            return .none
+        case let .windowInvalidated(wid):
+            state.focusedWindow = state.focusedWindow.filter {
+                $0.value.observed.wid != wid && $0.value.target.wid != wid
+            }
             return .none
         case let .frontProcessChanged(process):
             guard isLive(state, process) else { return .ignored(.staleGeneration) }
@@ -55,7 +58,8 @@ enum AttentionModel {
                 return .ignored(.staleSequence)
             }
             let before = state.visibleFront
-            state.focusedWindow[process] = FocusedWindowFact(target: target, namer: namer, sequence: sequence)
+            state.focusedWindow[process] = FocusedWindowFact(observed: observed, target: target,
+                namer: namer, sequence: sequence)
             if namer.carriesTheFrontProcess { state.frontProcess = process }
             // R2, every namer writes a fact, never a command. A late answer from an app the user has already
             // left updates that app's entry and moves nothing.
@@ -97,11 +101,44 @@ struct AttentionModelState: Equatable {
     /// would clear the front every time an app is activated before it has answered, which is exactly the
     /// guess the design refuses to make.
     var visibleFront: WindowIdentity? { frontProcess.flatMap { focusedWindow[$0]?.target } }
+
+    var currentUserContext: CurrentUserContext {
+        guard let frontProcess else { return .unknown }
+        guard let visibleFront else { return .application(frontProcess) }
+        return .window(visibleFront)
+    }
+
+    func lastAttendedWindow(_ pid: Int32) -> WindowIdentity? {
+        guard let process = liveGenerations[pid] else { return nil }
+        return focusedWindow[process]?.target
+    }
+}
+
+/// The strongest current statement the attention model can make for downstream UX. App-only is distinct
+/// from unknown, and neither is treated as evidence that the user is looking at no window.
+enum CurrentUserContext: Equatable {
+    case unknown
+    case application(ProcessGeneration)
+    case window(WindowIdentity)
+
+    var pid: Int32? {
+        switch self {
+        case .unknown: return nil
+        case .application(let process): return process.pid
+        case .window(let window): return window.process.pid
+        }
+    }
+
+    var wid: UInt32? {
+        guard case .window(let window) = self else { return nil }
+        return window.wid
+    }
 }
 
 /// One app's answer about one of its own windows, with the sequence that answer arrived (or, for the bounded
 /// read, was issued) under.
 struct FocusedWindowFact: Equatable {
+    var observed: WindowIdentity
     var target: WindowIdentity
     var namer: AttentionNamer
     var sequence: IngressSequence
@@ -125,6 +162,8 @@ enum AttentionNamer: Equatable {
 enum AttentionModelInput: Equatable {
     case processStarted(ProcessGeneration)
     case processExited(ProcessGeneration)
+    /// Lifecycle invalidation removes a cached answer; it does not name attention or move the front.
+    case windowInvalidated(UInt32)
     /// `NSWorkspace` named an app. It names no window, and that is the whole point of the split.
     case frontProcessChanged(ProcessGeneration)
     case named(AttentionNamer, observed: WindowIdentity, representative: WindowIdentity?, IngressSequence)

@@ -6,7 +6,7 @@ import CoreGraphics
 /// An app raising all its windows moves its key window to each of them in turn, and the accessibility
 /// channel reports every step faithfully (#5974's shape, measured at 29ms apart). Each step is a true
 /// statement, and the run as a whole is one z-order change in which the user went nowhere: the app puts keys
-/// back where they started at the end. Committing each answer scrambled the MRU (QA A-10).
+/// back where they started at the end. Committing each answer scrambled the MRU.
 ///
 /// The last answer is right for both cases — a raise ends where it started, a genuine switch ends on the new
 /// window — so waiting for the run to go quiet is the whole rule, and nothing has to be guessed in advance
@@ -19,7 +19,7 @@ struct AttentionSettlePolicy {
     /// A little over the 29ms an app raising its windows was measured at, so a whole run collapses to its
     /// final answer. **Widening it is not free**: it delays every genuine switch by the same amount, against
     /// a measured floor of 219ms for the fastest human action ever captured. Raises spaced wider than this
-    /// settle separately and #5974's shape returns — QA A-11 watches that limit in amber rather than
+    /// settle separately and #5974's shape returns — live QA watches that limit in amber rather than
     /// asserting it away, because the fix for it is a different signal, not a bigger number.
     static let settle: TimeInterval = 0.06
 

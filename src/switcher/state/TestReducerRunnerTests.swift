@@ -41,7 +41,7 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.spaceMembershipChanged(wid: 100, spaceId: 3, added: false, now: 10.1, inSpaceTransition: false)),
             .track(window(101, spaceIds: [3])),
             .input(.discoveryLanded(wid: 101, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: ["~", "~"])),
+                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: ["~", "~"], tabGroupToken: nil)),
             .input(.holdReleaseCheck(wid: 100, attempt: 0)),
         ])
         XCTAssertEqual(harness.violations, [])
@@ -111,7 +111,7 @@ final class TestReducerRunnerTests: XCTestCase {
         XCTAssertEqual(TestReducerRunner(initial: s).violations, [])
     }
 
-    /// QA T-05 (2026-08-02): "Move Tab to New Window", then the group re-forms around the two members that
+    /// Live QA (2026-08-02): "Move Tab to New Window", then the group re-forms around the two members that
     /// stayed. The exact-set form ungroups the window the user tore out, and ungrouping used to STRIP the
     /// Space the group had lent it. An empty `spaceIds` is the strong phantom signal — "CGS places this
     /// window nowhere" — so we asserted that about a window CGS had had on Space 3 the whole time, and its
@@ -167,7 +167,7 @@ final class TestReducerRunnerTests: XCTestCase {
                 isMinimized: false, isMainWindow: false, isWindowlessApp: false, cgsPhantomLatch: false,
                 lastLeftSpaceId: nil, lastFocusOrder: 0, creationOrder: 5, hasThumbnail: true)),
             .input(.discoveryLanded(wid: 5, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [100], isOrderedIn: true, tabTitles: nil)),
+                                    queriedSpaceIds: [100], isOrderedIn: true, tabTitles: nil, tabGroupToken: nil)),
         ])
         XCTAssertEqual(harness.violations, [])
         XCTAssertEqual(harness.state.window(5)?.spaceIds, [100])
@@ -292,7 +292,7 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.spaceMembershipChanged(wid: 10, spaceId: 1, added: false, now: 100.01, inSpaceTransition: false)),
             .track(win(99, size: CGSize(width: 1440, height: 900), spaceIds: [100], fullscreen: true, focus: 0)),
             .input(.discoveryLanded(wid: 99, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [100], isOrderedIn: true, tabTitles: nil)),
+                                    queriedSpaceIds: [100], isOrderedIn: true, tabTitles: nil, tabGroupToken: nil)),
         ])
         XCTAssertEqual(harness.violations, [])
         XCTAssertNil(harness.state.groups.groupId(of: 99).flatMap { gid in
@@ -302,9 +302,10 @@ final class TestReducerRunnerTests: XCTestCase {
 
     /// Reported live (2026-07-22 QA): on a FULLSCREEN Finder window, switching the visible tab to "Movies"
     /// then immediately opening the switcher showed the PREVIOUS tab; closing and reopening fixed it. A
-    /// fullscreen switch to a REUSED background wid carries no focus signal AltTab can see — no 808, no
-    /// create, and (the wid untracked at its Space-join) no `pendingFocusPromotion` — so the switched-to tab
-    /// is learned only via the show's AX scan, which `.track`s it at the BACK of the MRU. Geometry correctly
+    /// fullscreen switch to a REUSED background wid reaches physical discovery with no promotion attached —
+    /// no 808, no create, and (the wid untracked at its Space-join) no `pendingFocusPromotion` — so the
+    /// switched-to tab is learned only via the show's AX scan, which `.track`s it at the BACK of the MRU.
+    /// Geometry correctly
     /// elects it as the group's visible (`newlyDiscovered`), but `groupRepresentative` then picks by focus
     /// order, so a background sibling focused more recently won the tile until it was ordered out on close.
     /// Discovery must front the elected-visible newly-discovered tab so it represents its group at once.
@@ -334,7 +335,7 @@ final class TestReducerRunnerTests: XCTestCase {
                 isWindowlessApp: false, cgsPhantomLatch: false, lastLeftSpaceId: nil, lastFocusOrder: 0,
                 creationOrder: 134, hasThumbnail: true)),
             .input(.discoveryLanded(wid: 134, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [22], isOrderedIn: true, tabTitles: nil)),
+                                    queriedSpaceIds: [22], isOrderedIn: true, tabTitles: nil, tabGroupToken: nil)),
         ])
         XCTAssertEqual(harness.violations, [], "convergence: \(harness.trace)")
         // The switched-to tab represents its group — the switcher shows "Movies", not a background sibling.
@@ -351,6 +352,39 @@ final class TestReducerRunnerTests: XCTestCase {
     /// differently, where even the prefix fallback misses), or that every sibling is still untracked. The read
     /// used to dissolve the group geometry had just formed; geometry re-formed it on the next WindowServer
     /// event, and the pair churned between one tile and two for as long as the window lived. Same rule as the
+    /// The group token doing the job `recentPairingWindow` does by timing: two tabs whose AX titles name
+    /// nobody (composed titles, #5785) and whose frames share no cluster (the tab bar resized one of them)
+    /// still end up in one group, because each named the same `AXTabGroup` element while it was selected.
+    /// The tell is that no pairing WINDOW is involved: the second read lands whenever it lands.
+    func testTabsJoinOneGroupByTokenWhenTitlesAndFramesNameNobody() {
+        var s = TrackedWindowState()
+        finderApp(&s)
+        s.windows = [
+            win(20, size: CGSize(width: 1017, height: 610), spaceIds: [1], focus: 0, title: "Downloads"),
+            win(21, size: CGSize(width: 1017, height: 565), spaceIds: [], focus: 1, title: "Documents"),
+        ]
+        s.visibleSpaces = [1]
+        s.currentSpaceId = 1
+        s.spaceIndexById = [1: 1]
+        let harness = TestReducerRunner(initial: s)
+        // 20 is the selected tab, and its read is what says WHICH element this group is
+        harness.run([.input(.titleAndTabsRead(wid: 20, tabTitles: ["1. bash", "2. ssh"], tabGroupToken: 4242,
+                                              reconcileTabs: true, changedSoFar: false))])
+        XCTAssertNil(harness.state.groups.siblingWids(of: 20), "titles alone name nobody, as in #5785")
+        // the user switches tabs: 21 comes on-screen, 20 backgrounds (the two halves the reducer otherwise
+        // has to pair on a clock — here they only set the physical state, they decide nothing)
+        harness.run([
+            .input(.spaceMembershipChanged(wid: 21, spaceId: 1, added: true, now: 100.0, inSpaceTransition: false)),
+            .input(.spaceMembershipChanged(wid: 20, spaceId: 1, added: false, now: 100.4, inSpaceTransition: false)),
+        ])
+        // ...and 21's own read names the SAME element, long after any pairing window would have closed
+        harness.run([.input(.titleAndTabsRead(wid: 21, tabTitles: ["1. bash", "2. ssh"], tabGroupToken: 4242,
+                                              reconcileTabs: true, changedSoFar: false))])
+        XCTAssertEqual(harness.state.groups.siblingWids(of: 21)?.sorted(), [20, 21],
+            "the shared AXTabGroup element groups them where titles and frames cannot")
+        XCTAssertEqual(harness.violations, [], "convergence: \(harness.trace)")
+    }
+
     /// nil-titles path: a group shrinks only on a POSITIVE signal.
     func testTitlesThatNameNothingKeepTheGroup() {
         var s = TrackedWindowState()
@@ -365,7 +399,7 @@ final class TestReducerRunnerTests: XCTestCase {
         s.spaceIndexById = [1: 1]
         s.formGroup([20, 21], representative: 20, reason: "fixture")
         let harness = TestReducerRunner(initial: s)
-        harness.run([.input(.titleAndTabsRead(wid: 20, tabTitles: ["nothing", "matches"], reconcileTabs: true,
+        harness.run([.input(.titleAndTabsRead(wid: 20, tabTitles: ["nothing", "matches"], tabGroupToken: nil, reconcileTabs: true,
                                               changedSoFar: false))])
         XCTAssertEqual(harness.state.groups.siblingWids(of: 20)?.sorted(), [20, 21],
             "a read that named nothing must not dissolve the group")
@@ -392,7 +426,7 @@ final class TestReducerRunnerTests: XCTestCase {
         s.formGroup([30, 21], representative: 30, reason: "fixture")
         let harness = TestReducerRunner(initial: s)
         // the windowed active's AX read claims 21 as ITS tab, moving it out of the fullscreen group
-        harness.run([.input(.titleAndTabsRead(wid: 20, tabTitles: ["lwouis", "lwouis"], reconcileTabs: true,
+        harness.run([.input(.titleAndTabsRead(wid: 20, tabTitles: ["lwouis", "lwouis"], tabGroupToken: nil, reconcileTabs: true,
                                               changedSoFar: false))])
         XCTAssertEqual(harness.violations, [], "convergence: \(harness.trace)")
         // and it no longer wears the fullscreen flag it inherited from the group it left
@@ -448,7 +482,7 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.attentionCommitted(wid: 100, observed: 100, at: 10.1)),
             .track(window(150, pid: 600, spaceIds: [3])),
             .input(.discoveryLanded(wid: 150, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: nil)),
+                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: nil, tabGroupToken: nil)),
         ])
         XCTAssertEqual(harness.violations, [])
         XCTAssertEqual(harness.state.window(100)?.lastFocusOrder, 0, "the window focused during the gap keeps the front")
@@ -470,7 +504,7 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.windowOrderedIn(wid: 150, now: 10.0, inSpaceTransition: false)),
             .track(window(150, pid: 600, spaceIds: [3])),
             .input(.discoveryLanded(wid: 150, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: nil)),
+                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: nil, tabGroupToken: nil)),
         ])
         XCTAssertEqual(harness.violations, [])
         XCTAssertEqual(harness.state.window(100)?.lastFocusOrder, 0)
@@ -605,7 +639,7 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.spaceMembershipChanged(wid: 100, spaceId: 3, added: false, now: 10.01, inSpaceTransition: false)),
             .track(window(900, spaceIds: [3])),
             .input(.discoveryLanded(wid: 900, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: nil)),
+                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: nil, tabGroupToken: nil)),
         ])
         XCTAssertEqual(harness.state.window(100)?.replacedByWid, 900)
         XCTAssertEqual(harness.state.window(900)?.replacedWid, 100)
@@ -624,7 +658,7 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.spaceMembershipChanged(wid: 100, spaceId: 3, added: false, now: 10.01, inSpaceTransition: false)),
             .track(window(900, pid: 700, spaceIds: [3])),
             .input(.discoveryLanded(wid: 900, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: nil)),
+                                    queriedSpaceIds: [3], isOrderedIn: true, tabTitles: nil, tabGroupToken: nil)),
         ])
         XCTAssertNil(harness.state.window(100)?.replacedByWid)
         XCTAssertNil(harness.state.window(900)?.replacedWid)
@@ -643,8 +677,8 @@ final class TestReducerRunnerTests: XCTestCase {
         XCTAssertNil(harness.state.carried.pendingHandoverEdge[900])
     }
 
-    /// The OTHER way a mint never becomes a window: discovery REACHES it and the discriminator REJECTS it
-    /// (a panel, a 0×0 window, anything `WindowDiscriminator` turns down). A rejected wid is the one case
+    /// The OTHER way a mint never becomes a window: discovery reaches it and admission rejects it
+    /// (for example, an auxiliary panel). A rejected wid is the one case
     /// where we know for certain no window is coming — `accepted: false` is that verdict — so it is the
     /// cheapest possible drain, and without it the entry waits for a 804 that "lags a real close by seconds,
     /// or never fires" for apps that retain the CGWindow. That is the rec13 leak shape: the reducer already
@@ -653,13 +687,13 @@ final class TestReducerRunnerTests: XCTestCase {
     /// It matters beyond tidiness because `applyPendingHandoverEdge` is not time-bounded at CONSUMPTION: it
     /// is paired within `recentPairingWindow` but applied whenever its wid is finally discovered, so a
     /// resurrected wid could wear a stale `replacedWid`, which `dragOutVerdict` reads as a settled verdict.
-    func testPendingHandoverIsDrainedWhenTheMintIsRejectedByTheDiscriminator() {
+    func testPendingHandoverIsDrainedWhenTheMintIsRejectedByAdmission() {
         let harness = TestReducerRunner(initial: state(windows: [window(100, spaceIds: [3], lastFocusOrder: 0)]))
         harness.run([
             .input(.spaceMembershipChanged(wid: 900, spaceId: 3, added: true, now: 10.0, inSpaceTransition: false)),
             .input(.spaceMembershipChanged(wid: 100, spaceId: 3, added: false, now: 10.01, inSpaceTransition: false)),
             .input(.discoveryLanded(wid: 900, accepted: false, newlyTracked: false, adoptedAsInactiveTab: false,
-                                    queriedSpaceIds: [], isOrderedIn: true, tabTitles: nil)),
+                                    queriedSpaceIds: [], isOrderedIn: true, tabTitles: nil, tabGroupToken: nil)),
         ])
         XCTAssertNil(harness.state.carried.pendingHandoverEdge[900])
         XCTAssertNil(harness.state.carried.pendingGroupInheritance[900])
@@ -696,7 +730,7 @@ final class TestReducerRunnerTests: XCTestCase {
     }
 
     /// ...but a window we WATCHED being focused keeps its place. A real focus is knowledge; stacking is a
-    /// guess. Live capture (T-21, 2026-08-02): the just-focused Terminal tab had backgrounded into its own
+    /// guess. Live capture (2026-08-02): the just-focused Terminal tab had backgrounded into its own
     /// window, so the visible-Space query could not see it, and the seed sent it from tile 0 to tile 3 —
     /// ~20ms into the first summon, after the initial pick had been resolved against the old order, so the
     /// highlight came to rest on a window the user never chose.
@@ -718,7 +752,7 @@ final class TestReducerRunnerTests: XCTestCase {
     /// in place and reports nothing changed. The reducer then emits no log and, worse, no `.refreshUi`: the
     /// order really did change and the open switcher keeps drawing the old one.
     ///
-    /// Live evidence, 2026-08-25 QA run: G-14's process reordered the MRU front onto a Finder window with no
+    /// Live evidence, 2026-08-25 QA run: an app's process reordered the MRU front onto a Finder window with no
     /// `zOrder seed reordered` line anywhere in its debug log — the change was visible only in telemetry.
     /// Three investigations dead-ended on that silence.
     func testZOrderReportsWhatItMovedOnAColdModel() {
@@ -758,7 +792,7 @@ final class TestReducerRunnerTests: XCTestCase {
 
     // MARK: - switching to a tab we adopted but never grouped
 
-    /// Clicking a background tab fronts it even when we never managed to GROUP it (T-19).
+    /// Clicking a background tab fronts it even when we never managed to GROUP it.
     ///
     /// Finder's tabs share one title and keep a stale frame while they are backgrounded, so the AX-title
     /// match names nothing and geometry sees two different positions: the tab sits tracked, Space-less and

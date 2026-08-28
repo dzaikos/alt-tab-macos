@@ -587,6 +587,15 @@ final class SelectionResolverTests: XCTestCase {
         XCTAssertTrue(SelectionResolver.currentWindowIsDrawn([]))
     }
 
+    func testExactAttentionAnswersForTheWindowRatherThanItsApplication() {
+        XCTAssertFalse(SelectionResolver.currentWindowIsDrawn(.exactWindow(isDrawn: false)))
+        XCTAssertTrue(SelectionResolver.currentWindowIsDrawn(.exactWindow(isDrawn: true)))
+    }
+
+    func testUnknownAttentionPreservesTheOrdinaryRule() {
+        XCTAssertTrue(SelectionResolver.currentWindowIsDrawn(.unknown))
+    }
+
     /// G11. #5960 end to end, through both kernels: the reporter's own steps. Terminal frontmost over
     /// Chrome/Google and Chrome/YouTube, close Terminal's last window, summon. Terminal contributes only a
     /// placeholder, so the pick steps over the front tile as usual and lands on Chrome/YouTube. Answering

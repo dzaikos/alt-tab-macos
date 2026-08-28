@@ -5,7 +5,7 @@ import XCTest
 ///
 /// The #5849 regression: `_AXUIElementGetWindow` returns the containing window's id for a window's
 /// DESCENDANTS too, so a brute-force scan that stopped at the first wid match returned a descendant
-/// (`AXOutline` / `AXMenuButton` / `AXGroup`) instead of the `AXWindow` root, and the discriminator
+/// (`AXOutline` / `AXMenuButton` / `AXGroup`) instead of the `AXWindow` root, and admission
 /// dropped the window entirely. These tests guarantee only the `AXWindow` root for the target wid is
 /// accepted, so a descendant sharing the wid can never win the scan again.
 final class BruteForceWindowMatchTests: XCTestCase {
@@ -93,7 +93,7 @@ final class BruteForceWindowMatchTests: XCTestCase {
 
     /// Merge All Windows never converges the absorbed windows' frames: they keep their own cascade positions,
     /// frozen, one 29px step apart from each other and from the merged window. Demanding a match with the
-    /// requester would make those tabs permanently un-adoptable (T-03/T-04), so a frame that sits on NOTHING
+    /// requester would make those tabs permanently un-adoptable, so a frame that sits on NOTHING
     /// is waved through.
     func testAdoptsAMergedTabAtItsOwnFrozenCascadePosition() {
         let merged = CGRect(x: 942, y: 277, width: 757, height: 543)

@@ -3,8 +3,7 @@ import Foundation
 /// Detects whether a window is a "phantom": present in macOS APIs (AX hands it back with a valid
 /// `CGWindowID`) but not something the app actually means to show the user — alpha=0 Outlook reminders,
 /// `orderOut:` / `show:false` Electron windows, WeChat/Teams hidden windows, etc. The pixel content may
-/// be absent, black, or anything; what matters is that AltTab shouldn't offer it as a switch target. See
-/// `src/experimentations/PhantomWindowDetection.swift` for the full investigation.
+/// be absent, black, or anything; what matters is that AltTab shouldn't offer it as a switch target.
 ///
 /// Pure kernel over the test-constructible `WindowState` + `ApplicationState` records (no SkyLight, no
 /// `@testable`). Two entry points, by how much CGS data the caller has — they share the same notion of
@@ -31,7 +30,7 @@ enum PhantomWindowDetector {
     /// Authoritative — runs ~250ms post-show off-main (`Applications.refreshIsPhantom`) with the two CGS
     /// window lists (`inVisibleList` excludes the `.invisible1/.invisible2` tags, `inAllList` includes
     /// them). Knows BOTH the strong and weak signals; owns the full verdict, including clearing.
-    /// Disambiguation order matches `PhantomWindowDetection.swift`.
+    /// Disambiguation order is in `PhantomWindowDetectorSpecs.md`.
     ///
     /// `isFocused` = this window is the most-recently-focused one AND its app is frontmost, i.e. the window
     /// the user is looking at right now. It exempts ONLY the weak signal (see below).

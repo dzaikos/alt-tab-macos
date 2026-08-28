@@ -156,6 +156,15 @@ struct TestInteractionModel {
     /// reading them unevenly (only the apps that list the group as a child) was tried and reverted.
     private func tabsReadable(_ w: RealWindow) -> Bool { !w.isFullscreen }
 
+    /// The `AXTabGroup` element the OS hands out for this window's group. Modelled as the window's own
+    /// identity because that is exactly what it is: one element per logical window, the same one from every
+    /// tab of it, for as long as the group lives. nil under the same conditions the shell reads nil (no tab
+    /// bar, or a fullscreen bar `tabGroupInfo` does not reach), so the model never hands the reducer an
+    /// identity the real read could not have supplied.
+    private func tabGroupToken(_ w: RealWindow) -> TabGroupToken? {
+        w.tabs.count > 1 && tabsReadable(w) ? TabGroupToken(w.identity) : nil
+    }
+
     private(set) var world = [RealWindow]()
     private var createdIdentities = [Int]()
     private var nextWid: CGWindowID = 1000
@@ -349,23 +358,6 @@ struct TestInteractionModel {
 
     // MARK: - per-action event emission
 
-    /// The FIRST discovery of any freshly-created wid, and it is REJECTED. The OS publishes a window — and
-    /// every new tab — at 0×0 and sizes it a beat later, so the discovery the create event schedules reads
-    /// 0×0, fails the min-size filter, and lands as `accepted: false`; the same wid is re-discovered from its
-    /// first move/resize and accepted then. Both landings are in the log for every single created wid (live
-    /// #5785 capture: `windowCreated #4131` 41.577, `rejected … size is 0x0 (4131…)` 41.616, `accepted …
-    /// (1017.0, 610.0)` 41.827).
-    ///
-    /// Modelled because that first landing runs the same reducer branch as the real one and used to CONSUME
-    /// the new wid's pending state — the handover edge naming the tab it replaced above all. Omitting it kept
-    /// `testFirstTabInAStandaloneWindowIsOneTileDespiteTheTabBarResize` green while the live capture showed
-    /// two tiles. Kept in the SAME read unit as the accepted landing, ahead of it: the interleaving fuzz is
-    /// free to order units, and a rejection arriving after its own acceptance is not a real ordering.
-    private static func rejectedZeroSizedLanding(_ wid: CGWindowID) -> TestReducerRunner.Step {
-        .input(.discoveryLanded(wid: wid, accepted: false, newlyTracked: false, adoptedAsInactiveTab: false,
-            queriedSpaceIds: [], isOrderedIn: true, tabTitles: nil))
-    }
-
     private mutating func newWindow(pid: pid_t) -> ActionEvents {
         let wid = newWid()
         let identity = nextIdentity; nextIdentity += 1
@@ -387,10 +379,10 @@ struct TestInteractionModel {
             e.ordered = [.setSpaces(visible: [windowedSpace], current: windowedSpace, index: (windowedSpace, 1))]
         }
         e.ordered += appSteps(pid) + [.input(.windowCreated(wid: wid, now: tick(), inSpaceTransition: false))]
-        e.readUnits = [[Self.rejectedZeroSizedLanding(wid),
-                        .track(trackedWindow(identity: identity, wid: wid, spaceIds: [windowedSpace])),
+        e.readUnits = [[.track(trackedWindow(identity: identity, wid: wid, spaceIds: [windowedSpace])),
                         .input(.discoveryLanded(wid: wid, accepted: true, newlyTracked: true,
-                            adoptedAsInactiveTab: false, queriedSpaceIds: [windowedSpace], isOrderedIn: true, tabTitles: nil))]]
+                            adoptedAsInactiveTab: false, queriedSpaceIds: [windowedSpace], isOrderedIn: true,
+                            tabTitles: nil, tabGroupToken: nil))]]
         e.ordered.append(.input(.windowFocused(wid: wid, now: tick())))
         return e
     }
@@ -429,11 +421,11 @@ struct TestInteractionModel {
                // was still drawn — the one fact that separates a tab from a real window we lost the Space of.
                .input(.windowOrderedOut(wid: oldWid, inSpaceTransition: false)),
                .input(.spaceMembershipChanged(wid: oldWid, spaceId: space, added: false, now: tick(), inSpaceTransition: false))]
-        e.readUnits = [[Self.rejectedZeroSizedLanding(wid),
-                        .track(trackedWindow(identity: identity, wid: wid, spaceIds: [space])),
+        e.readUnits = [[.track(trackedWindow(identity: identity, wid: wid, spaceIds: [space])),
                         .input(.discoveryLanded(wid: wid, accepted: true, newlyTracked: true,
                             adoptedAsInactiveTab: false, queriedSpaceIds: [space],
-                            isOrderedIn: true, tabTitles: world[wi].tabs.map { $0.title })),
+                            isOrderedIn: true, tabTitles: world[wi].tabs.map { $0.title },
+                            tabGroupToken: tabGroupToken(world[wi]))),
                         // the replacement landed, so the hold on the tab it displaced ends
                         .input(.holdReleaseCheck(wid: oldWid, attempt: 0))]]
         return e
@@ -574,7 +566,8 @@ struct TestInteractionModel {
                     + [.track(trackedWindow(identity: world[i].identity, wid: active.wid, spaceIds: [world[i].space])),
                        .input(.discoveryLanded(wid: active.wid, accepted: true, newlyTracked: true,
                            adoptedAsInactiveTab: false, queriedSpaceIds: [world[i].space],
-                           isOrderedIn: true, tabTitles: tabsReadable(world[i]) ? world[i].tabs.map { $0.title } : nil))]
+                           isOrderedIn: true, tabTitles: tabsReadable(world[i]) ? world[i].tabs.map { $0.title } : nil,
+                           tabGroupToken: tabGroupToken(world[i])))]
                     // the tabs this discovery replaced can stop being held
                     + pendingHoldReleaseWids.map { .input(.holdReleaseCheck(wid: $0, attempt: 0)) })
                 pendingHoldReleaseWids = []
@@ -600,19 +593,20 @@ struct TestInteractionModel {
                 e.readUnits.append([.track(trackedWindow(identity: world[i].identity, wid: wid,
                         spaceIds: [], isFullscreen: false)),
                     .input(.discoveryLanded(wid: wid, accepted: true, newlyTracked: true,
-                        adoptedAsInactiveTab: true, queriedSpaceIds: [], isOrderedIn: true, tabTitles: nil))])
+                        adoptedAsInactiveTab: true, queriedSpaceIds: [], isOrderedIn: true,
+                        tabTitles: nil, tabGroupToken: nil))])
             }
         }
         // The active tab's AXTabGroup read, WINDOWED ONLY — `tabsReadable` gates it, matching what
         // `AXUIElement.tabGroupInfo` actually reads (direct children). Not because a fullscreen tab group is
         // unreadable: a live probe showed a fullscreen window exposes the same AXTabGroup with the same tab
-        // buttons and titles, nested one level deeper (`AXWindow/AXGroup/AXTabGroup`, dumps in
-        // `experimentations/TabbedWindowDetection.swift`). Descending to it was reverted because only SOME
+        // buttons and titles, nested one level deeper (`AXWindow/AXGroup/AXTabGroup`). Descending to it was
+        // reverted because only SOME
         // apps expose it that way, and modelling an app-dependent read would grade downstream changes against
         // a world AltTab does not live in. See `tabsReadable` and `AXUIElement.tabGroupInfo`.
         for w in world where w.tabs.count > 1 && tabsReadable(w) {
             e.readUnits.append([.input(.titleAndTabsRead(wid: w.activeWid, tabTitles: w.tabs.map { $0.title },
-                reconcileTabs: true, changedSoFar: false))])
+                tabGroupToken: tabGroupToken(w), reconcileTabs: true, changedSoFar: false))])
         }
         // authoritative Space re-query (active tab → its Space; everything else absent)
         // The map is built from AltTab's TRACKED windows, so an UNTRACKED minted active contributes nothing —

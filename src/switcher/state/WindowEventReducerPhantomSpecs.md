@@ -65,12 +65,12 @@ that moment instead of waiting for a pass (`TrackedWindowState.clearPhantomOnFoc
 
 ### D. The same, for the window a reopened app comes back to (#5849, second report)
 
-Reopening Slack from the Dock reaches the front through the ACTIVATION, which emits no 808 naming the
-window: the app's own answer to `kAXFocusedWindow` is the only signal there is. While that answer bumped the
-MRU straight from the shell it bypassed the clear in C, so the latch survived — the switcher summoned 130 ms
-later hid the window the user was looking at while it held slot 0, and the default pick skipped past it onto
-a third app. Every namer now reaches the model through `.attentionCommitted`, so there is one path and one
-clear.
+Reopening Slack from the Dock reaches the front through an activation that names only the process. The
+attention model uses Slack's cached focused-window fact, or requests one bounded `kAXFocusedWindow` read if
+no fact exists. While that answer used to bump MRU straight from the shell it bypassed the clear in C, so the
+latch survived — the switcher summoned 130 ms later hid the window the user was looking at while it held slot
+0, and the default pick skipped past it onto a third app. Every namer now reaches the model through
+`.attentionCommitted`, so there is one path and one clear.
 
 - **testTheReopenedWindowsLatchIsCleared** — the app's answer fronts the window, clears its latch, and drops
   the placeholder its app grew.

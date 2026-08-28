@@ -15,16 +15,15 @@ enum DirectedAttentionKind: Equatable {
 ///
 /// Its real job is translation, and the translation IS the architecture. The reducer's vocabulary is shaped
 /// by where an event came from (the WindowServer, accessibility, our own switch). The model's is shaped by
-/// what the evidence MEANS: an activation names an app and nothing else, an app's answer is a fact about
+/// what the evidence MEANS: a plain activation names an app and nothing else, an app's answer is a fact about
 /// that app rather than a bid for the global front, and the WindowServer's order and focus family maps to
-/// nothing at all. There is no physical input to attention, which is why the mapping below has a long list
-/// of cases that return an empty array.
+/// nothing at all. Physical lifecycle can erase a dead cached wid but cannot name attention, which is why the
+/// mapping below otherwise has a long list of cases that return an empty array.
 struct AttentionDriver {
     /// Resolves the facts the model needs but a reducer input does not carry. Closures because the live
     /// answers come from `Applications`/`TabGroups`, and tests supply their own.
     struct Context {
         let generation: (pid_t) -> ProcessGeneration?
-        let pidOf: (CGWindowID) -> pid_t?
         /// the wid that stands for this window in the switcher — itself, or its tab group's representative
         let representativeOf: (CGWindowID) -> CGWindowID?
         /// the app that is frontmost RIGHT NOW, from the model rather than from observed transitions
@@ -39,6 +38,8 @@ struct AttentionDriver {
         var reason = "noInput"
         /// the window the provider NAMED, before the tab mapping — see `ReducerInput.attentionCommitted`
         var observedWid: CGWindowID?
+        /// the one factless activation that needs an off-main `kAXFocusedWindow` read
+        var readPid: pid_t?
     }
 
     private(set) var attention = AttentionModelState()
@@ -50,8 +51,17 @@ struct AttentionDriver {
 
     /// One reducer dispatch, decided.
     mutating func decide(_ input: ReducerInput, context: Context) -> Outcome {
-        let result = reduceAttention(translate(input, context))
-        return Outcome(wid: result.wid, reason: result.reason, observedWid: Self.namedWindow(in: input))
+        var result = reduceAttention(translate(input, context))
+        let observed = Self.namedWindow(in: input) ?? result.observedWid
+        if case let .appActivated(pid, _, nil) = input, let observed, result.wid != nil {
+            if let representative = context.representativeOf(observed) {
+                result.wid = representative
+            } else if let process = context.generation(pid) {
+                result = reduceAttention([.windowInvalidated(observed), .frontProcessChanged(process)])
+            }
+        }
+        return Outcome(wid: result.wid, reason: result.reason, observedWid: observed,
+            readPid: result.readProcess?.pid)
     }
 
     /// A click naming its target. The strongest evidence in the system and the earliest: it lands before the
@@ -60,20 +70,23 @@ struct AttentionDriver {
     mutating func decideDirected(_ kind: DirectedAttentionKind, pid: pid_t, wid: CGWindowID,
                                  context: Context) -> Outcome {
         guard let process = register(pid, context), let identity = identity(wid, process, context) else {
-            return Outcome(wid: nil, reason: "unknownProcess", observedWid: wid)
+            return Outcome(wid: nil, reason: "unknownProcess", observedWid: wid, readPid: nil)
         }
         let result = reduceAttention([.named(.click, observed: identity.observed,
             representative: identity.representative, nextAttention())])
-        return Outcome(wid: result.wid, reason: result.reason, observedWid: wid)
+        return Outcome(wid: result.wid, reason: result.reason, observedWid: wid, readPid: nil)
     }
 
     /// An answer arriving from the AX provider rather than as a reducer input. Same sequence space, so a late
     /// answer is measured against the directed evidence that may have overtaken it.
     mutating func decideSemantic(pid: pid_t, wid: CGWindowID, context: Context) -> Outcome {
         syncFrontmost(context)
-        let read = ReducerInput.axFocusedWindowRead(wid: wid, viaActivationBackstop: false)
-        let result = reduceAttention(translate(read, context))
-        return Outcome(wid: result.wid, reason: result.reason, observedWid: wid)
+        guard let process = register(pid, context), let identity = identity(wid, process, context) else {
+            return Outcome(wid: nil, reason: "unknownProcess", observedWid: wid, readPid: nil)
+        }
+        let result = reduceAttention([.named(.app, observed: identity.observed,
+            representative: identity.representative, nextAttention())])
+        return Outcome(wid: result.wid, reason: result.reason, observedWid: wid, readPid: nil)
     }
 
     mutating func processExited(_ generation: ProcessGeneration) {
@@ -85,7 +98,7 @@ struct AttentionDriver {
     /// background tabs, and that wid is the whole signal — see `ReducerInput.attentionCommitted`.
     private static func namedWindow(in input: ReducerInput) -> CGWindowID? {
         switch input {
-        case let .axFocusedWindowRead(wid, _): return wid
+        case let .axFocusedWindowRead(_, wid, _): return wid
         case let .altTabFocusedWindowInFrontmostApp(wid, _, _): return wid
         case let .appActivated(_, _, altTabTargetWid): return altTabTargetWid
         default: return nil
@@ -108,8 +121,8 @@ struct AttentionDriver {
         case .titleAndTabsRead: return "titleAndTabs"
         case .windowServerStateRead: return "wsStateRead"
         case .spacesSynced: return "spacesSynced"
-        case .axFocusedWindowRead(_, let viaActivationBackstop):
-            return viaActivationBackstop ? "axActivationBackstop" : "axFocusedRead"
+        case .axFocusedWindowRead(_, _, let viaActivationRead):
+            return viaActivationRead ? "axActivationRead" : "axFocusedRead"
         case .altTabFocusedWindowInFrontmostApp: return "altTab"
         case .axFocusedWindowReadFailed: return "axReadFailed"
         case .livenessConfirmedDead: return "livenessDead"
@@ -126,23 +139,22 @@ struct AttentionDriver {
         switch input {
         case let .appActivated(pid, _, altTabTargetWid):
             guard let process = register(pid, context) else { return [] }
-            var inputs: [AttentionModelInput] = [.frontProcessChanged(process)]
             if let wid = altTabTargetWid, let identity = identity(wid, process, context) {
-                inputs.append(.named(.altTab, observed: identity.observed,
-                    representative: identity.representative, nextAttention()))
+                return [.named(.altTab, observed: identity.observed,
+                    representative: identity.representative, nextAttention())]
             }
-            return inputs
+            return [.frontProcessChanged(process)]
         case let .altTabFocusedWindowInFrontmostApp(wid, pid, _):
             guard let process = register(pid, context),
                   let identity = identity(wid, process, context) else { return [] }
             return [.named(.altTab, observed: identity.observed, representative: identity.representative,
                 nextAttention())]
-        case let .axFocusedWindowRead(wid, viaActivationBackstop):
+        case let .axFocusedWindowRead(pid, wid, viaActivationRead):
             syncFrontmost(context)
-            guard let pid = context.pidOf(wid), let process = register(pid, context),
+            guard let process = register(pid, context),
                   let identity = identity(wid, process, context) else { return [] }
-            let issued = viaActivationBackstop ? readIssuedAt.removeValue(forKey: process) : nil
-            return [.named(viaActivationBackstop ? .activationRead : .app, observed: identity.observed,
+            let issued = viaActivationRead ? readIssuedAt.removeValue(forKey: process) : nil
+            return [.named(viaActivationRead ? .activationRead : .app, observed: identity.observed,
                 representative: identity.representative, issued ?? nextAttention())]
         case let .axFocusedWindowReadFailed(pid):
             guard let process = register(pid, context) else { return [] }
@@ -150,10 +162,12 @@ struct AttentionDriver {
             // one would carry a sequence older than its own arrival and lose to nothing at all.
             readIssuedAt[process] = nil
             return [.focusedWindowUnknown(process)]
-        case .windowFocused, .windowOrderedIn, .windowOrderedOut, .windowCreated, .windowDestroyed,
+        case let .windowDestroyed(wid), let .livenessConfirmedDead(wid):
+            return [.windowInvalidated(wid)]
+        case .windowFocused, .windowOrderedIn, .windowOrderedOut, .windowCreated,
              .windowMovedOrResized, .zOrderRead, .spaceMembershipChanged,
              .spaceTransitionStarted, .spaceChangeSettled, .discoveryLanded, .titleAndTabsRead,
-             .windowServerStateRead, .spacesSynced, .livenessConfirmedDead, .cgsWindowListsRead,
+             .windowServerStateRead, .spacesSynced, .cgsWindowListsRead,
              .holdReleaseCheck, .dragOutCheck,
              // Our own commit coming back through the bridge. Offering it again would decide against our own
              // output.
@@ -165,18 +179,27 @@ struct AttentionDriver {
     /// Reduces and reports: the last window the model put in front, or why it put none there. A
     /// `readFocusedWindow` decision is where the bounded read fires, so its issue sequence is remembered here
     /// for the answer to carry back.
-    private mutating func reduceAttention(_ inputs: [AttentionModelInput]) -> (wid: CGWindowID?, reason: String) {
+    private mutating func reduceAttention(_ inputs: [AttentionModelInput])
+        -> (wid: CGWindowID?, observedWid: CGWindowID?, reason: String,
+            readProcess: ProcessGeneration?) {
         var decisions = [AttentionModelDecision]()
+        var readProcess: ProcessGeneration?
         for input in inputs {
             let decision = AttentionModel.reduce(&attention, input)
-            if case let .readFocusedWindow(process) = decision { readIssuedAt[process] = nextAttention() }
+            if case let .readFocusedWindow(process) = decision {
+                if readIssuedAt[process] == nil {
+                    readIssuedAt[process] = nextAttention()
+                    readProcess = process
+                }
+            }
             decisions.append(decision)
         }
         let front = decisions.compactMap { decision -> WindowIdentity? in
             guard case let .front(target) = decision else { return nil }
             return target
         }.last
-        return (front?.wid, front == nil ? describe(decisions) : "front")
+        let observed = front.flatMap { attention.focusedWindow[$0.process]?.observed.wid }
+        return (front?.wid, observed, front == nil ? describe(decisions) : "front", readProcess)
     }
 
     private func describe(_ decisions: [AttentionModelDecision]) -> String {
@@ -198,12 +221,12 @@ struct AttentionDriver {
     /// **Seed the model's idea of the front app from the world, not only from transitions it happened to
     /// witness.** It learns "frontmost" from activations, and an app that was already frontmost when AltTab
     /// started produced none — so every answer that app gave was about a process the model did not think was
-    /// in front, and Cmd+` inside it moved nothing (S-06).
+    /// in front, and Cmd+` inside it moved nothing.
     private mutating func syncFrontmost(_ context: Context) {
         guard let pid = context.frontmostPid(), let process = context.generation(pid) else { return }
         guard attention.frontProcess != process else { return }
         _ = AttentionModel.reduce(&attention, .processStarted(process))
-        _ = reduceAttention([.frontProcessChanged(process)])
+        _ = AttentionModel.reduce(&attention, .frontProcessChanged(process))
     }
 
     /// A pid the model has not seen — or has seen under an older generation — is registered before its event

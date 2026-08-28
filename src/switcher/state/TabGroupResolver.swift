@@ -59,12 +59,16 @@ struct TabWindow: Equatable {
     /// was dropped back over its parent.
     var replacedWid: CGWindowID?
     /// How many tabs the window's own AXTabGroup last reported (0 = none read, or not tabbed). The ONE tab
-    /// fact macOS states reliably: the AXTabGroup's presence means tabbed and its button count is exact
-    /// (`experimentations/TabbedWindowDetection.swift`). Only the per-tab TITLES are unreliable: an app may
+    /// fact macOS states reliably: the AXTabGroup's presence means tabbed and its button count is exact.
+    /// Only the per-tab TITLES are unreliable: an app may
     /// compose its window title from more than its tab label, which is what stock Terminal does and what
     /// left #5785's groups unformable. So the count is what confirms a geometry cluster when titles can't
     /// (`geometryGroups`), and what BOUNDS it: a fold wider than the count is over-claiming by construction.
     var tabCount = 0
+    /// The `AXTabGroup` element this window named on its last read as the selected tab (see `TabGroupToken`).
+    /// The only membership fact here the OS states outright: titles and frames are inferences ABOUT a group,
+    /// this IS the group. nil for a window we have never read as a selected tab, which is most of them.
+    var tabGroupToken: TabGroupToken?
 }
 
 /// A tab group inferred purely from geometry (no AX): the visible tab (holds a Space) plus the
@@ -89,7 +93,7 @@ struct SiblingMatch: Equatable {
 
 /// Pure decisions behind OS-tab detection, extracted from `TabGroup` so the brittle parts — the
 /// geometry inference and the AX-title sibling matching (the documented "match tabs to windows by title"
-/// limitation, see `experimentations/TabbedWindowDetection.swift`) — are unit-testable without the `Window`
+/// limitation) — are unit-testable without the `Window`
 /// graph. The `TabGroup` adapter owns the `Windows.list` reads/writes; this kernel only decides. See
 /// `TabGroupResolverSpecs.md`.
 ///
@@ -225,7 +229,7 @@ enum TabGroupResolver {
     /// Merge All Windows folds N windows into one tabbed window and never converges their frames: the merged
     /// window is a BRAND-NEW wid one cascade step past the last of them, and the absorbed windows keep the
     /// positions they had, frozen (no geometry event ever reaches an ordered-out tab). Measured live, Finder
-    /// and Terminal alike (2026-07-30 QA, T-03/T-04 — the capture is `terminalMerge4Tabs`):
+    /// and Terminal alike (2026-07-30 QA — the capture is `terminalMerge4Tabs`):
     ///
     ///     +0:Terminal#65640(F) sp=[3] 757x543@942,277   ← the merged window
     ///     -1:Terminal#65637(p) sp=[]  757x543@913,248   ← the absorbed ones, frames frozen 29px apart
@@ -274,7 +278,7 @@ enum TabGroupResolver {
     /// reports no AXTabGroup for a beat mid-switch, and retiring on it tore live groups apart). So a window
     /// that WAS a 3-tab active keeps `tabCount` 3 forever after a tab is dragged out of it.
     ///
-    /// Measured live (T-05, 2026-07-30): Window ▸ Move Tab to New Window, drag-out correctly confirmed, and
+    /// Measured live (2026-07-30): Window ▸ Move Tab to New Window, drag-out correctly confirmed, and
     /// then geometry put the torn-out window straight back — `group form g13 members=[72914, 72915, 72910]
     /// reason=geometry`, folding the window at (290,712) into the group at (1116,683) it had just left. The
     /// cluster had three members and 72915's stale 3 "accounted" for them; the genuine on-screen member 72914
@@ -686,6 +690,40 @@ enum TabGroupResolver {
         // it as a stray visible tile that the next stale read fought over, endlessly. A stale read keeps the
         // fresher member; the strict `<` means a genuinely-departed window (equal or older focus) still falls
         // through to `toUntabWids`.
+        // Windows the OS itself puts in this group: they named the SAME `AXTabGroup` element as the active
+        // (`TabGroupToken`). Every other route here is an inference ABOUT a group — a title that might be
+        // shared or composed differently (#5785), a frame that might coincide — while this one is the group,
+        // stated by AppKit. So it needs no title and no geometry to agree, and it claims the tabs those two
+        // routes cannot: Terminal composes tab titles unlike window titles, and after "Merge All Windows"
+        // absorbed frames never converge.
+        //
+        // It is NOT allowed to skip the two gates that stop a claim HIDING a real window, because those are
+        // about staleness rather than about evidence: a token is recorded when a window is read as the
+        // selected tab and it outlives that instant. Outside a creation, then, a candidate must still look
+        // like an inactive tab (Space-less, held/borrowed, or already tabbed) and must still not be on
+        // screen. During a creation the claim is the sanctioned atomic one, same exemption the size-matched
+        // second pass takes above and for the same reason: the outgoing tab's 1326 has not landed yet.
+        // Fullscreen is excluded throughout — entering fullscreen REPLACES the element, so a fullscreen
+        // window never shares a windowed group's token, and the invariant is worth stating twice.
+        let tokenWids = sameAppWindows.filter { s in
+            s.wid != active.wid && !matchedWids.contains(s.wid)
+                && active.tabGroupToken != nil && s.tabGroupToken == active.tabGroupToken
+                && !s.isFullscreen
+                && (activeIsNewlyDiscovered
+                    || ((s.isTabbed || s.spaceIds.isEmpty || spaceIsOurAnnotation(s)) && (s.isTabbed || !s.isOrderedIn)))
+        }.map { $0.wid }
+        matchedWids.append(contentsOf: tokenWids)
+        // ...and the REST of the group each of them is already in. The token says this active joins THAT
+        // group, and `form` is exact-set, so naming the one sibling the token happened to reach would EJECT
+        // its other members — a real window's tile split off from the group it never left (generator seed 18,
+        // where composed titles name nobody and only the two most recent tabs had ever been read as active).
+        // Nothing here re-decides their membership: they are grouped already, and a member that genuinely
+        // left is taken out by its own signal, never by this one's silence.
+        let tokenGroupWids = sameAppWindows.filter { s in
+            s.wid != active.wid && !matchedWids.contains(s.wid)
+                && s.tabbedSiblingWids?.contains(where: { tokenWids.contains($0) }) == true
+        }.map { $0.wid }
+        matchedWids.append(contentsOf: tokenGroupWids)
         let keptWids = sameAppWindows.filter { s in
             s.wid != active.wid && !matchedWids.contains(s.wid)
                 && s.tabbedSiblingWids?.contains(active.wid) == true
@@ -696,8 +734,9 @@ enum TabGroupResolver {
         for title in matchedTitles {
             if let i = untrackedTitles.firstIndex(of: title) { untrackedTitles.remove(at: i) }
         }
-        // each kept sibling accounts for one AX title we couldn't name — don't re-discover a tab we hold.
-        for _ in keptWids where !untrackedTitles.isEmpty { untrackedTitles.removeFirst() }
+        // each kept or token-matched sibling accounts for one AX title we couldn't name — don't re-discover a
+        // tab we already hold, and don't let the same title be filled twice.
+        for _ in keptWids + tokenWids + tokenGroupWids where !untrackedTitles.isEmpty { untrackedTitles.removeFirst() }
         // Un-tab only windows that WERE in this group but are neither matched nor kept — their `isTabbed` was
         // cleared (they became standalone). A different group's tabs never contain the active wid.
         let toUntabWids = sameAppWindows.filter { s in

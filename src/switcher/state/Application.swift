@@ -104,9 +104,8 @@ class Application: NSObject {
         kvObservers = [
             runningApplication.observe(\.activationPolicy, options: [.new]) { [weak self] _, _ in
                 guard let self else { return }
-                if self.runningApplication.activationPolicy != .regular {
-                    self.removeWindowlessAppWindow()
-                }
+                if self.canShowWindowlessPlaceholder() { _ = self.addWindowlessWindowIfNeeded() }
+                else { self.removeWindowlessAppWindow() }
                 self.ensureAxUiElement()
             },
         ]
@@ -131,8 +130,8 @@ class Application: NSObject {
     }
 
     func ensureAxUiElement() {
-        // AX event subscriptions are gone — WindowServerEvents owns window state. The app's AXUIElement is
-        // still created lazily, for the on-demand reads (subrole/title/tabs) and the window actions.
+        // The app-level observer registry owns semantic notifications. This element is the separate handle
+        // used for discovery reads (subrole/title/tabs), the focused-window seed, and window actions.
         if runningApplication.activationPolicy != .prohibited && axUiElement == nil {
             axUiElement = AXUIElementCreateApplication(self.pid)
         }
@@ -152,13 +151,7 @@ class Application: NSObject {
 
     @discardableResult
     func addWindowlessWindowIfNeeded() -> Window? {
-        // A window nothing has vouched for does not count as the app having a window: it is not drawn, so an
-        // app whose only windows are WindowServer candidates would otherwise lose its placeholder and vanish
-        // from the switcher entirely while its app was hung.
-        guard runningApplication.activationPolicy == .regular && !runningApplication.isTerminated
-               && !(Windows.list.contains {
-                   $0.application.pid == self.pid && !$0.isPhantom && $0.axStatus.isPresentable
-               }) else { return nil }
+        guard canShowWindowlessPlaceholder() else { return nil }
         let window = Window(self)
         Windows.appendWindow(window)
         focusedWindow = nil
@@ -168,6 +161,15 @@ class Application: NSObject {
         Logger.debug { "windowless + \(self.runningApplication.localizedName ?? "?") pid=\(self.pid) (no non-phantom window)" }
         App.refreshOpenUiAfterExternalEvent([])
         return window
+    }
+
+    private func canShowWindowlessPlaceholder() -> Bool {
+        let ownWindows = Windows.list.filter { $0.application.pid == state.pid }
+        return WindowlessApplicationResolver.shouldCreate(
+            isRegular: runningApplication.activationPolicy == .regular,
+            isTerminated: runningApplication.isTerminated,
+            hasExistingPlaceholder: ownWindows.contains { $0.isWindowlessApp },
+            hasNonPhantomWindow: ownWindows.contains { !$0.isWindowlessApp && !$0.isPhantom })
     }
 
     func removeWindowlessAppWindow() {

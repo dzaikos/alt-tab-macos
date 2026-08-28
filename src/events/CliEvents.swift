@@ -93,8 +93,8 @@ class CliServer {
             return qaState()
         }
         // The provider timeline, drained rather than read: each record is reported exactly once, so a QA test
-        // gets the events of its own session and not the whole run's backlog. `alt-tab-qa` writes them out as
-        // NDJSON beside `results.json` (`TrackingTelemetryNdjson`).
+        // gets the events of its own session and not the whole run's backlog. The harness writes them out as
+        // NDJSON (`TrackingTelemetryNdjson`).
         if rawValue == "--qa-telemetry" {
             return QaTelemetryDrain(v: TrackingTelemetryState.schemaVersion,
                 records: TrackingTelemetryRecorder.drain())
@@ -135,7 +135,7 @@ class CliServer {
     }
 
     /// Read-only snapshot of everything the switcher would decide, without showing the UI. Exists for the
-    /// automated QA harness (`ai/qa`): a live assertion oracle that costs one IPC round-trip instead of
+    /// automated QA harness: a live assertion oracle that costs one IPC round-trip instead of
     /// parsing debug logs or screenshotting tiles. Mutates nothing — `shown` is computed into a local, not
     /// written to `Window.shouldShowTheUser`, and the list is not sorted.
     private static func qaState() -> Codable {

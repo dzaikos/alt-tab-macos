@@ -26,8 +26,7 @@ enum WindowFilterResolver {
                            visibleSpaceIds: [UInt64] = [],       // CGSSpaceID === UInt64
                            exceptions: [ExceptionEntry] = [],
                            isOnPreferredScreen: @autoclosure () -> Bool) -> Bool {
-        s.axStatus.isPresentable &&
-            !s.isPhantom &&
+        !s.isPhantom &&
             !ExceptionMatcher.hidesWindow(s, app, exceptions: exceptions,
                 activeAppOverride: onlyFrontmostApp && frontmostPid == app.pid) &&
             !(onlyFrontmostApp && !(frontmostPid == app.pid)) &&
