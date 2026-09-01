@@ -16,12 +16,15 @@ import CoreGraphics
 /// **Per process, never global.** Two apps answering at once are two independent facts (`AttentionModelSpecs`
 /// — a fact about an app is not a bid for the front), so one app's burst must not delay another's answer.
 struct AttentionSettlePolicy {
-    /// A little over the 29ms an app raising its windows was measured at, so a whole run collapses to its
-    /// final answer. **Widening it is not free**: it delays every genuine switch by the same amount, against
-    /// a measured floor of 219ms for the fastest human action ever captured. Raises spaced wider than this
-    /// settle separately and #5974's shape returns — live QA watches that limit in amber rather than
-    /// asserting it away, because the fix for it is a different signal, not a bigger number.
-    static let settle: TimeInterval = 0.06
+    /// Genuine input keeps the measured 60ms burst collapse. With no recent key or mouse event, a longer
+    /// settle covers the 150ms programmatic raise sequence from A-11 without taxing user navigation.
+    static let userSettle: TimeInterval = 0.06
+    static let programmaticSettle: TimeInterval = 0.2
+    static let recentInputHorizon: TimeInterval = 0.5
+
+    static func settle(recentInputAge: TimeInterval) -> TimeInterval {
+        recentInputAge <= recentInputHorizon ? userSettle : programmaticSettle
+    }
 
     struct Pending: Equatable {
         let wid: CGWindowID
@@ -34,9 +37,10 @@ struct AttentionSettlePolicy {
     /// An answer arrived. It supersedes whatever this process had pending — including its deadline, which is
     /// what makes a run of answers collapse rather than commit the first one `settle` after it started.
     /// Returns when the caller should ask `fire`.
-    mutating func offer(pid: pid_t, wid: CGWindowID, now: TimeInterval) -> (deadline: TimeInterval, armedAt: TimeInterval) {
+    mutating func offer(pid: pid_t, wid: CGWindowID, now: TimeInterval,
+                        settle: TimeInterval = Self.userSettle) -> (deadline: TimeInterval, armedAt: TimeInterval) {
         pending[pid] = Pending(wid: wid, armedAt: now)
-        return (now + Self.settle, now)
+        return (now + settle, now)
     }
 
     /// A deadline fired. `armedAt` NAMES the arrival that armed it: a timer from a superseded answer must

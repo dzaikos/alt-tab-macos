@@ -335,6 +335,17 @@ final class TabGroupResolverTests: XCTestCase {
         XCTAssertEqual(m, SiblingMatch(siblingWids: [1, 2], matchedWids: [2], untrackedTitles: [], toUntabWids: []))
     }
 
+    func testDuplicateTitlePrefersTheExistingGroupRepresentative() {
+        let active = tw(wid: 1, title: "same", tabbedSiblingWids: [1, 3])
+        let unattached = tw(wid: 2, spaceIds: [], title: "same")
+        var representative = tw(wid: 3, spaceIds: [1], title: "same", tabbedSiblingWids: [1, 3])
+        representative.isHeld = true
+        let m = TabGroupResolver.matchSiblings(active: active, axTitles: ["same", "same"],
+                                                sameAppWindows: [active, unattached, representative])
+        XCTAssertEqual(m.siblingWids, [1, 3])
+        XCTAssertEqual(m.toUntabWids, [])
+    }
+
     func testDepartedSiblingUntabbedOnceNoLongerTabbed() {
         // Once the departed tab's own AX read clears its `isTabbed` (it became a standalone window), the next
         // match of the old active un-tabs it (clears the stale link). This is how a real drag-out settles.
@@ -371,6 +382,28 @@ final class TabGroupResolverTests: XCTestCase {
         XCTAssertEqual(m, SiblingMatch(siblingWids: [1], matchedWids: [], untrackedTitles: ["lwouis"], toUntabWids: []))
     }
 
+    func testZeroSizedMergeUsesTheExactTabCountAcrossFrozenFrames() {
+        let active = tw(wid: 1, size: .zero, position: .zero, title: "A", tabCount: 4)
+        let absorbed = [tw(wid: 2, position: CGPoint(x: 129, y: 129), spaceIds: [], title: "B"),
+                        tw(wid: 3, position: CGPoint(x: 158, y: 158), spaceIds: [], title: "C"),
+                        tw(wid: 4, position: CGPoint(x: 187, y: 187), spaceIds: [], title: "D")]
+        let m = TabGroupResolver.matchSiblings(active: active, axTitles: ["A", "B", "C", "D"],
+                                                sameAppWindows: [active] + absorbed)
+        XCTAssertEqual(m.siblingWids, [1, 2, 3, 4])
+        XCTAssertEqual(m.untrackedTitles, [])
+    }
+
+    func testTitleMatchCannotTakeATabFromAnotherVisibleGroup() {
+        let active = tw(wid: 1, title: "same", tabbedSiblingWids: [1, 2, 3], tabCount: 3)
+        let own = tw(wid: 2, spaceIds: [], title: "same", isTabbed: true, tabbedSiblingWids: [1, 2, 3])
+        let otherRep = tw(wid: 4, title: "same", tabbedSiblingWids: [4, 5, 6], isOrderedIn: true)
+        let otherTab = tw(wid: 5, spaceIds: [], title: "same", isTabbed: true, tabbedSiblingWids: [4, 5, 6])
+        let m = TabGroupResolver.matchSiblings(active: active, axTitles: ["same", "same", "same"],
+                                                sameAppWindows: [active, own, otherRep, otherTab])
+        XCTAssertEqual(m.siblingWids, [1, 2])
+        XCTAssertFalse(m.siblingWids.contains(5))
+    }
+
     func testNewlyDiscoveredActiveClaimsOnScreenSameSizeSibling() {
         // The creation-race fix: a brand-new active tab (activeIsNewlyDiscovered) claims its previous active
         // tab even though that sibling still shows a stale Space (its 1326 hasn't landed) — same app, same
@@ -380,6 +413,20 @@ final class TabGroupResolverTests: XCTestCase {
         let m = TabGroupResolver.matchSiblings(active: active, axTitles: ["~", "~"],
             sameAppWindows: [active, oldActive], activeIsNewlyDiscovered: true)
         XCTAssertEqual(m, SiblingMatch(siblingWids: [1, 2], matchedWids: [2], untrackedTitles: [], toUntabWids: []))
+    }
+
+    func testNewlyDiscoveredActiveKeepsTheInheritedPresentableRepresentative() {
+        let active = tw(wid: 3, size: .zero, position: .zero, title: "~",
+                        tabbedSiblingWids: [3, 2, 1], tabCount: 5)
+        let oldRepresentative = tw(wid: 2, spaceIds: [1], title: "~", isTabbed: false,
+                                   tabbedSiblingWids: [3, 2, 1], lastFocusOrder: 1)
+        let inactive = tw(wid: 1, spaceIds: [], title: "~", isTabbed: true,
+                          tabbedSiblingWids: [3, 2, 1], lastFocusOrder: 2)
+        let m = TabGroupResolver.matchSiblings(active: active,
+            axTitles: ["~", "~", "~", "~", "~"], sameAppWindows: [active, oldRepresentative, inactive],
+            activeIsNewlyDiscovered: true)
+        XCTAssertEqual(Set(m.siblingWids), Set([1, 2, 3]))
+        XCTAssertFalse(m.toUntabWids.contains(2))
     }
 
     func testNewlyDiscoveredDoesNotClaimDifferentSizeWindow() {

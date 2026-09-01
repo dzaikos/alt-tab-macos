@@ -830,6 +830,8 @@ enum ReducerEffect: Equatable {
     case applyFocus(CGWindowID)
     /// `App.refreshOpenUiAfterExternalEvent(wids)`; some call sites fire only while the switcher is open
     case refreshUi(wids: [CGWindowID], onlyWhileSwitcherOpen: Bool)
+    /// repaint an attention decision without the structural-event throttle
+    case refreshUiImmediately(wids: [CGWindowID])
     /// remove the window from the live model (`Windows.removeWindows`, view/scheduler/subscription cleanup)
     case removeWindow(CGWindowID)
     /// copy a sibling's thumbnail onto a freshly-active representative (the app-icon-gap placeholder)

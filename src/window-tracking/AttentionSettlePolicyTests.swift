@@ -37,9 +37,9 @@ final class AttentionSettlePolicyTests: XCTestCase {
     func testTheDeadlineIsPushedBackByEachAnswer() {
         var policy = AttentionSettlePolicy()
         XCTAssertEqual(policy.offer(pid: chrome, wid: 1, now: 0).deadline,
-                       AttentionSettlePolicy.settle, accuracy: 0.0001)
+                       AttentionSettlePolicy.userSettle, accuracy: 0.0001)
         XCTAssertEqual(policy.offer(pid: chrome, wid: 2, now: 0.029).deadline,
-                       0.029 + AttentionSettlePolicy.settle, accuracy: 0.0001)
+                       0.029 + AttentionSettlePolicy.userSettle, accuracy: 0.0001)
     }
 
     /// One answer with nothing behind it is not a burst: it commits, unchanged.
@@ -67,5 +67,23 @@ final class AttentionSettlePolicyTests: XCTestCase {
         let armed = policy.offer(pid: chrome, wid: 1, now: 0).armedAt
         policy.forget(pid: chrome)
         XCTAssertNil(policy.fire(pid: chrome, armedAt: armed))
+    }
+
+    func testRecentInputSelectsTheShortSettle() {
+        XCTAssertEqual(AttentionSettlePolicy.settle(recentInputAge: 0.1),
+                       AttentionSettlePolicy.userSettle)
+        XCTAssertEqual(AttentionSettlePolicy.settle(recentInputAge: 1.0),
+                       AttentionSettlePolicy.programmaticSettle)
+    }
+
+    func testAProgrammaticRunSpaced150msApartCommitsOnce() {
+        var policy = AttentionSettlePolicy()
+        var armed: TimeInterval = 0
+        for (i, wid) in [CGWindowID(1), 2, 3, 1].enumerated() {
+            let now = Double(i) * 0.15
+            armed = policy.offer(pid: chrome, wid: wid, now: now,
+                                 settle: AttentionSettlePolicy.programmaticSettle).armedAt
+        }
+        XCTAssertEqual(policy.fire(pid: chrome, armedAt: armed), 1)
     }
 }

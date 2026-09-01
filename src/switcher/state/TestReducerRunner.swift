@@ -153,6 +153,8 @@ final class TestReducerRunner {
             trace.append("[\(stepIndex)] \(line)")
         case .refreshUi(let wids, let onlyWhileSwitcherOpen):
             refreshes.append((wids, onlyWhileSwitcherOpen))
+        case .refreshUiImmediately(let wids):
+            refreshes.append((wids, false))
         case .deferCaptureUntilRestoreEnds(let wid):
             deferredCaptures.append(wid)
         case .copyThumbnail, .applyFocus, .updateScreenId, .removeWindowlessPlaceholder,

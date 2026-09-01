@@ -23,9 +23,9 @@ order** — no other rule looks at runs of events any more.
 - state is per process: one app's burst never delays another app's answer
 - a process exit drops its pending answer, so a reused pid inherits nothing
 
-`settle` is 60ms, a little over the measured 29ms spacing. Widening it delays every genuine switch by the
-same amount, against a 219ms floor for the fastest human action ever captured; raises spaced wider than it
-commit separately and #5974's shape returns (live QA watches that in amber).
+Recent hardware input uses a 60ms settle, a little over the measured 29ms spacing. With no key or mouse
+event in the last 500ms, the answer is programmatic and settles for 200ms. That collapses A-11's measured
+150ms raise sequence without adding latency to genuine user navigation.
 
 ## Test scenarios
 
@@ -38,3 +38,5 @@ commit separately and #5974's shape returns (live QA watches that in amber).
 - **testAQuietAnswerCommitsItself** — one answer with nothing after it is not a burst and commits normally.
 - **testTwoAppsSettleIndependently** — a talkative app does not hold up a quiet one's answer.
 - **testAProcessExitDropsItsPendingAnswer** — and a reused pid inherits nothing.
+- **testRecentInputSelectsTheShortSettle** — input recency chooses latency rather than changing verdicts.
+- **testAProgrammaticRunSpaced150msApartCommitsOnce** — A-11's wider raise still ends on its last answer.

@@ -316,9 +316,30 @@ enum WindowEventReducer {
             target = observed
         }
         guard state.window(target) != nil else { return effects }
+        effects += inheritHeldGroupAtAttention(&state, target: target)
         effects += applyFocusAndBump(&state, wid: target, at: at, .attentionReducer)
         normalizeGroupVisibility(&state, into: &effects)
         return effects
+    }
+
+    /// Finder can publish two new fullscreen surfaces for one tab while the WindowServer handover has room
+    /// to remember only the latest join. The semantic focus answer names the real destination after its model
+    /// object exists but before `discoveryLanded`; use the still-held outgoing representative to settle that
+    /// ambiguous physical pair atomically. The hold and shared Space are the in-flight handover proof.
+    private static func inheritHeldGroupAtAttention(_ state: inout TrackedWindowState,
+                                                    target: CGWindowID) -> [ReducerEffect] {
+        guard state.groups.groupId(of: target) == nil, let incoming = state.window(target) else { return [] }
+        let incomingSpaces = Set(incoming.spaceIds)
+        guard !incomingSpaces.isEmpty,
+              let outgoing = state.held.compactMap({ state.window($0) }).filter({ candidate in
+                  candidate.wid != target && candidate.pid == incoming.pid
+                      && (!incomingSpaces.isDisjoint(with: candidate.spaceIds)
+                          || candidate.lastLeftSpaceId.map(incomingSpaces.contains) == true)
+              }).min(by: { $0.lastFocusOrder < $1.lastFocusOrder }),
+              let outgoingWid = outgoing.wid else { return [] }
+        let members = state.groups.siblingWids(of: outgoingWid) ?? [outgoingWid]
+        let formed = state.formGroup([target] + members, representative: target, reason: "semanticHandover")
+        return formed.logs.map { .log($0) }
     }
 
     /// **The one place the window order is written.** The trio every focus-bump site fires (focusedWindow +
@@ -583,7 +604,10 @@ enum WindowEventReducer {
             // `testSupersededMintedTab…` scenarios, every one of them a fullscreen one. So the two arms
             // partition the problem by regime — fullscreen here, windowed there — and neither subsumes the
             // other. Do not "consolidate" them without re-running that pair of experiments.
-            if now - state.carried.lastUntrackedVisibleSpaceJoinAt < recentPairingWindow,
+            if let joiner = exactUntrackedSuccessor(of: wid, in: state) {
+                let members = state.groups.siblingWids(of: wid) ?? [wid]
+                state.carried.pendingGroupInheritance[joiner] = members
+            } else if now - state.carried.lastUntrackedVisibleSpaceJoinAt < recentPairingWindow,
                let joiner = state.carried.lastUntrackedVisibleSpaceJoinWid, joiner != wid,
                state.carried.untrackedJoinedSpace[joiner] == spaceId,
                state.window(joiner) == nil {
@@ -672,6 +696,12 @@ enum WindowEventReducer {
             effects.append(contentsOf: reconcileTabsForAppEffects(state, pid: window.pid))
         }
         return effects
+    }
+
+    private static func exactUntrackedSuccessor(of wid: CGWindowID, in state: TrackedWindowState) -> CGWindowID? {
+        state.carried.pendingHandoverEdge.first { joiner, edge in
+            edge.pendingSideJoined && edge.partnerWid == wid && state.window(joiner) == nil
+        }?.key
     }
 
     /// The leave-first half of a tab handover. The outgoing representative is already held when the

@@ -41,8 +41,9 @@ final class SwitcherSession {
     /// or remove a tile before the hovered one and the hover silently moves to its neighbour, which the
     /// bounds check cannot catch because the index is still in range.
     var hoveredTarget: String?
-    /// True once the USER moved the selection themselves (cycled with the shortcut/arrows, or hovered), as
-    /// opposed to it sitting on the default pick. It decides whether `selectedTarget` is a commitment to
+    /// True once the USER moved the selection themselves (cycled with the shortcut/arrows, or hovered) or
+    /// acted on it (`ShortcutActions`), as opposed to it sitting on the default pick untouched. It decides
+    /// whether `selectedTarget` is a commitment to
     /// follow or just where the default landed: a user's pick must stay on ITS window however the list
     /// reorders (#5665), while the default must keep tracking the model — the window set is still settling
     /// when the switcher opens, and locking the default onto whatever occupied the slot mid-churn made the

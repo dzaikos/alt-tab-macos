@@ -51,6 +51,9 @@ Mirrors `WindowEventReducerFocusTests.swift` 1:1.
   promote and must not reach into another app.
 - **testMinimizedWindowsAreNotPromoted** / **testInactiveTabsAreNotPromoted** — a window the user cannot see
   is not a successor.
+- **testMinimizingTheFocusedWindowPromotesTheFrontmostAppsNextWindow** — minimizing slot 0 is the same
+  structural vacancy as removing it. The frontmost app's next visible window takes the slot; a background
+  app's minimize cannot trigger this repair.
 
 ### B. Nothing physical may move the order
 
@@ -61,7 +64,8 @@ own any more — both were bursts of 815s and 808s, and neither event can reach 
 
 - **testAFocusEventCannotMoveTheOrder** / **testAnOrderInCannotMoveTheOrder** — an 808 and an 815 leave the
   order exactly as they found it.
-- **testCommittedAttentionMovesTheOrder** — a decision from `AttentionModel` is what moves it.
+- **testCommittedAttentionMovesTheOrder** — a decision from `AttentionModel` is what moves it, and it requests
+  an immediate repaint so an open switcher does not spend the structural-event throttle before showing it.
 - **testCommittedAttentionForAnUnknownWindowIsIgnored** — a decision naming a window nobody tracks is
   dropped, never fabricated into one.
 - **testAStructuralRepairStillWrites** — the other writer: not a claim about the user, so it is never gated.
@@ -77,6 +81,12 @@ own any more — both were bursts of 815s and 808s, and neither event can reach 
 
 - **testNamingABackgroundTabMovesTheGroupRepresentative** — an app answering with one of its background tabs
   moves the tile that stands for it, because that is what the switcher draws.
+- **testSemanticFocusCarriesAHeldGroupPastAnAmbiguousPhysicalJoin** — when fullscreen Finder publishes two
+  joining surfaces for one tab and the physical handover pairs the wrong one, the semantic focus answer names
+  the real destination while the outgoing group is still held. The outgoing tab is already Space-less, so
+  its recorded `lastLeftSpaceId` proves the shared Space and carries the whole group to the destination.
+- **testSemanticFocusDoesNotCarryAHeldGroupFromAnotherSpace** — a held group whose recorded departure names
+  another Space remains separate; timing and app identity alone cannot merge it.
 - **testNamingAWindowInNoGroupJustMovesTheOrder** — the same decision for an ordinary window touches no
   grouping at all.
 

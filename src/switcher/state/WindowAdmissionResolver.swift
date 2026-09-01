@@ -112,6 +112,7 @@ enum WindowAdmissionResolver {
                         evidence: WindowAdmissionEvidence = .discovery) -> SwitchDestinationDecision {
         guard physical.wid != 0 else { return .reject(.invalidWindowId) }
         guard physical.parentWid == 0 else { return .represent(parentWid: physical.parentWid, .attachedSurface) }
+        if let semantic, isAuxiliary(semantic.subrole) { return .reject(.auxiliarySurface) }
         if evidence == .attention { return .destination(.exactAttention) }
         guard let semantic else { return .latent(.awaitingAccessibility) }
         if semantic.isWindowRole && semantic.isMain == true { return .destination(.mainWindow) }
@@ -119,8 +120,8 @@ enum WindowAdmissionResolver {
         if semantic.subrole == kAXDialogSubrole {
             return semantic.hasTitle ? .destination(.conventionalWindow) : .latent(.untitledDialog)
         }
-        if isAuxiliary(semantic.subrole) { return .reject(.auxiliarySurface) }
         if semantic.isWindowRole && semantic.hasTitle && physical.isSubstantial {
+            if semantic.isMain != true && physical.level != normalLevel { return .reject(.auxiliarySurface) }
             return .destination(.customWindowRoot)
         }
         guard semantic.isWindowRole else { return .reject(.nonWindowRole) }

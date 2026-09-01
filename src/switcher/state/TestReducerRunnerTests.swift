@@ -645,6 +645,24 @@ final class TestReducerRunnerTests: XCTestCase {
         XCTAssertEqual(harness.state.window(900)?.replacedWid, 100)
     }
 
+    /// Entering fullscreen changes the visible Space before the topology callback catches up. The exact
+    /// handover still names the minted successor, so group inheritance must not depend on the stale snapshot.
+    func testFullscreenHandoverInheritsItsGroupWhileVisibleSpacesAreStale() {
+        var s = state(windows: [window(100, spaceIds: [30], lastFocusOrder: 0),
+                                window(101, spaceIds: [], lastFocusOrder: 1)])
+        s.formGroup([100, 101], representative: 100, reason: "test")
+        s.visibleSpaces = [3]
+        let harness = TestReducerRunner(initial: s)
+        harness.run([
+            .input(.windowCreated(wid: 900, now: 10.0, inSpaceTransition: false)),
+            .input(.spaceMembershipChanged(wid: 900, spaceId: 30, added: true, now: 10.01,
+                                           inSpaceTransition: false)),
+            .input(.spaceMembershipChanged(wid: 100, spaceId: 30, added: false, now: 10.02,
+                                           inSpaceTransition: false)),
+        ])
+        XCTAssertEqual(harness.state.carried.pendingGroupInheritance[900]?.sorted(), [100, 101])
+    }
+
     /// The pid check `recordHandover` does inline for two tracked windows has to happen at CONSUMPTION when
     /// one side was untracked — that is the first moment the pid exists. A coincidence between two apps must
     /// not survive the wait.

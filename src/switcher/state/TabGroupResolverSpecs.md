@@ -132,9 +132,15 @@ Several independent signals locate tabs, used at different times:
   that is MORE RECENTLY FOCUSED than the reading active — AX reads are queued, so a read can land right after
   the user switched to another member, and treating the reader as the active then ejected the REAL active
   from its own group, stranding it as a stray tile that successive stale reads fought over (rec18). Strict
-  `<`, so a genuinely-departed window still reaches `toUntabWids`. Returns the group's wids (active first), the
+  `<`, so a genuinely-departed window still reaches `toUntabWids`. A newly discovered active also keeps the
+  whole handover group it inherited: while that incoming window is still 0×0, normalize leaves the previous
+  active as the presentable representative, and ejecting that un-tabbed representative on the first AX read
+  flashes a second tile during a fast Cmd+T burst (T-02). Returns the group's wids (active first), the
   matched+kept wids, `untrackedTitles` (titles with no window → inactive tabs to discover), and `toUntabWids`
   (windows that were in this group but are no longer tabbed).
+  When duplicate titles leave fewer AX slots than compatible tracked windows, an existing member of this
+  active's group is matched before an unattached candidate. Otherwise model order can spend the last slot on
+  a newly adopted tab and eject the group's visible representative until geometry repairs it (T-01/T-02).
   **Merge All Windows: the tabs never converge on a frame.** "Tabs of one window share its frame" — the premise
   every position rule here rests on — is simply false after Window ▸ Merge All Windows. The merged window is a
   BRAND-NEW wid one cascade step past the last of the windows it absorbed, and those keep the positions they
@@ -174,6 +180,11 @@ Several independent signals locate tabs, used at different times:
   all and no tab count pulls it in. Residual: merging a window that ALREADY had tabs leaves more members than
   the merged window has tabs (the absorbed group's own wids), so exactness refuses it and that shape keeps
   today's split behaviour.
+- **The merged active may initially be 0×0.** In that interval it cannot join the absorbed windows' size
+  cluster, so `zeroSizedMergeClaim` applies the same exact-count proof on the title path: the active must be
+  0×0, its AX count must equal every candidate plus itself, all candidates must be ordered out, and none may
+  belong to another visible group. A normally sized active still obeys the strict position rule; the captured
+  Terminal merge and `testNoTitleMatchEverClaimsAcrossFrames` pin that boundary.
 - **`positionsCompatible(a, b) -> Bool`** — tabs share their parent's frame. An existing tab link wins (a
   stale position can't split an already-grouped pair). Unknown position or either fullscreen → title-only
   fallback (true). Otherwise positions must match EXACTLY (rounded): macOS cascades new windows by 29px, so

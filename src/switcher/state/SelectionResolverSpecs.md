@@ -164,6 +164,11 @@ question from the frontmost app's windows (#5960) · plus direct helper-kernel c
   anything, and still doesn't.
 
 ### G. Answering `currentWindowIsDrawn` from the frontmost app's windows (#5960)
+
+An exact attention identity is used only while that window can still be the drawn front window. A minimized,
+phantom, windowless, or background-tab identity is stale by construction; the shell then answers from the
+frontmost application's viable windows. This covers the handoff after minimizing the exact window and the brief
+tab-switch interval where attention still names the outgoing background tab.
 - **testCurrentWindowIsDrawnIsFalseWhenARealWindowIsFilteredOut** — the #5941 case the flag exists for.
 - **testCurrentWindowIsDrawnIsTrueWhenTheRealWindowIsDrawn** — its control.
 - **testCurrentWindowIsDrawnIsTrueWhenOnlySomeWindowsAreFilteredOut** — one tile of the app is drawn.

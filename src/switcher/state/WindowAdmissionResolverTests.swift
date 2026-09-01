@@ -57,9 +57,24 @@ final class WindowAdmissionResolverTests: XCTestCase {
             .reject(.auxiliarySurface))
     }
 
-    func testMainFloatingPanelIsDestination() {
+    func testMainFloatingPanelIsRejected() {
         XCTAssertEqual(WindowAdmissionResolver.resolve(physical(), semantic(subrole: kAXFloatingWindowSubrole, isMain: true)),
-            .destination(.mainWindow))
+            .reject(.auxiliarySurface))
+    }
+
+    func testAttentionDoesNotTurnFloatingPanelIntoDestination() {
+        XCTAssertEqual(WindowAdmissionResolver.resolve(physical(), semantic(subrole: kAXFloatingWindowSubrole),
+            evidence: .attention), .reject(.auxiliarySurface))
+    }
+
+    func testNonMainCustomRootAtFloatingLevelIsAuxiliary() {
+        XCTAssertEqual(WindowAdmissionResolver.resolve(physical(level: 3), semantic(subrole: kAXUnknownSubrole)),
+            .reject(.auxiliarySurface))
+    }
+
+    func testCustomRootWithUnknownMainFlagAtFloatingLevelIsAuxiliary() {
+        let s = semantic(subrole: kAXUnknownSubrole, isMain: nil)
+        XCTAssertEqual(WindowAdmissionResolver.resolve(physical(level: 3), s), .reject(.auxiliarySurface))
     }
 
     func testSteamLikeCustomRootNeedsNoAppException() {

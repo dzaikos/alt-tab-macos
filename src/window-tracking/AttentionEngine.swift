@@ -112,18 +112,27 @@ class AttentionEngine {
     ///
     /// The last answer is the right one for both cases — the raise ends where it started, a genuine switch
     /// ends on the new window — so waiting for the run to stop is enough, and nothing has to be guessed in
-    /// advance and taken back. The wait is a little over the measured spacing and is invisible unless the
-    /// user summons the switcher inside it.
+    /// advance and taken back. A recent hardware event identifies user navigation and keeps the measured
+    /// 60ms wait; answers with no recent key or mouse input use 200ms, covering A-11's 150ms programmatic
+    /// sequence without adding latency to genuine switches.
     ///
     /// A click is NOT debounced: it names its target exactly, and it is the user's own action. Cmd+` reaches
     /// attention only through this same accessibility channel — the tap is silent for it — and is debounced
     /// with everything else the app says.
     static func axSemanticFocus(pid: pid_t, wid: CGWindowID) {
-        let armed = settlePolicy.offer(pid: pid, wid: wid, now: ProcessInfo.processInfo.systemUptime)
-        DispatchQueue.main.asyncAfter(deadline: .now() + AttentionSettlePolicy.settle) {
+        let settle = AttentionSettlePolicy.settle(recentInputAge: recentInputAge())
+        let armed = settlePolicy.offer(pid: pid, wid: wid, now: ProcessInfo.processInfo.systemUptime,
+                                       settle: settle)
+        DispatchQueue.main.asyncAfter(deadline: .now() + settle) {
             guard let target = settlePolicy.fire(pid: pid, armedAt: armed.armedAt) else { return }
             applySemanticFocus(pid: pid, wid: target)
         }
+    }
+
+    private static func recentInputAge() -> TimeInterval {
+        [CGEventType.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
+            .map { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0) }
+            .min() ?? .infinity
     }
 
     /// Which answer survives a run is `AttentionSettlePolicy`'s (a pure triad); the timer is this file's.

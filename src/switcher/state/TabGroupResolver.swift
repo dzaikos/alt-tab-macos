@@ -598,10 +598,11 @@ enum TabGroupResolver {
                               activeIsNewlyDiscovered: Bool = false) -> SiblingMatch {
         var remainingTitles = axTitles
         if let i = remainingTitles.firstIndex(of: active.title) { remainingTitles.remove(at: i) }
+        let zeroSizedMergeWids = zeroSizedMergeClaim(active, remainingTitles, sameAppWindows)
         var matchedWids = [CGWindowID]()
         var matchedTitles = [String]()
         for title in remainingTitles {
-            if let sibling = sameAppWindows.first(where: { s in
+            let candidates = sameAppWindows.filter { s in
                 s.wid != active.wid && s.title == title
                     && !matchedWids.contains(s.wid)
                     // Only a window that is PLAUSIBLY an inactive tab can be claimed: already tabbed,
@@ -641,8 +642,10 @@ enum TabGroupResolver {
                     // and the membership union then merged the two windows (generator seed 30). Reads the
                     // same `lastLeftSpaceId` history the geometry path reads in `settledOnAnotherWindowsSpace`.
                     && !belongsToAWindowOnAnotherSpace(s, activeOn: active)
-                    && positionsCompatible(active, s)
-            }) {
+                    && !belongsToAnotherVisibleGroup(s, active, sameAppWindows)
+                    && (positionsCompatible(active, s) || zeroSizedMergeWids.contains(s.wid))
+            }
+            if let sibling = preferredExistingMember(candidates, active) {
                 matchedWids.append(sibling.wid)
                 matchedTitles.append(sibling.title)
             }
@@ -661,7 +664,7 @@ enum TabGroupResolver {
             var unfilledTitles = remainingTitles
             for t in matchedTitles { if let i = unfilledTitles.firstIndex(of: t) { unfilledTitles.remove(at: i) } }
             for title in unfilledTitles {
-                if let sibling = sameAppWindows.first(where: { s in
+                let candidates = sameAppWindows.filter { s in
                     s.wid != active.wid && s.title == title && !matchedWids.contains(s.wid)
                         // Same fullscreen Space invariant as the first pass. The size gate is NOT a
                         // substitute for it: that argument assumes the ACTIVE is windowed, and it isn't when
@@ -669,8 +672,10 @@ enum TabGroupResolver {
                         // screen-sized, the size gate passes, and this pass claimed a whole separate
                         // fullscreen window as a tab (generator seed 6).
                         && !s.isFullscreen
+                        && !belongsToAnotherVisibleGroup(s, active, sameAppWindows)
                         && sizesMatch(active, s) && positionsCompatible(active, s)
-                }) {
+                }
+                if let sibling = preferredExistingMember(candidates, active) {
                     matchedWids.append(sibling.wid)
                     matchedTitles.append(sibling.title)
                 }
@@ -690,6 +695,10 @@ enum TabGroupResolver {
         // it as a stray visible tile that the next stale read fought over, endlessly. A stale read keeps the
         // fresher member; the strict `<` means a genuinely-departed window (equal or older focus) still falls
         // through to `toUntabWids`.
+        // A newly discovered active also keeps every member of the handover group the reducer just inherited.
+        // During a rapid Cmd+T burst the incoming window is still 0×0, so normalize deliberately leaves the
+        // prior active as the presentable representative (`isTabbed == false`). Ejecting that representative
+        // on the first AX read splits one window into two tiles until the incoming frame arrives (T-02).
         // Windows the OS itself puts in this group: they named the SAME `AXTabGroup` element as the active
         // (`TabGroupToken`). Every other route here is an inference ABOUT a group — a title that might be
         // shared or composed differently (#5785), a frame that might coincide — while this one is the group,
@@ -727,7 +736,8 @@ enum TabGroupResolver {
         let keptWids = sameAppWindows.filter { s in
             s.wid != active.wid && !matchedWids.contains(s.wid)
                 && s.tabbedSiblingWids?.contains(active.wid) == true
-                && (s.isTabbed || (!s.spaceIds.isEmpty && s.lastFocusOrder < active.lastFocusOrder))
+                && (s.isTabbed || activeIsNewlyDiscovered
+                    || (!s.spaceIds.isEmpty && s.lastFocusOrder < active.lastFocusOrder))
         }.map { $0.wid }
         matchedWids.append(contentsOf: keptWids)
         var untrackedTitles = remainingTitles
@@ -744,6 +754,42 @@ enum TabGroupResolver {
         }.map { $0.wid }
         return SiblingMatch(siblingWids: [active.wid] + matchedWids, matchedWids: matchedWids,
             untrackedTitles: untrackedTitles, toUntabWids: toUntabWids)
+    }
+
+    /// Duplicate titles make the AX list a count rather than an identity. Spend those slots on members this
+    /// active already owns before unattached candidates, or a partial read can eject the group's presentable
+    /// representative and expose it as a second tile until the next geometry pass (T-01/T-02).
+    private static func preferredExistingMember(_ candidates: [TabWindow], _ active: TabWindow) -> TabWindow? {
+        candidates.first { $0.tabbedSiblingWids?.contains(active.wid) == true } ?? candidates.first
+    }
+
+    /// Merge All Windows can publish its new selected window at 0×0 while every absorbed tab keeps the frame
+    /// of its former cascaded window. At that instant geometry cannot put the active in their size cluster.
+    /// An exact AX count covering every ordered-out title candidate proves the fold until its frame arrives.
+    private static func zeroSizedMergeClaim(_ active: TabWindow, _ titles: [String],
+                                            _ windows: [TabWindow]) -> Set<CGWindowID> {
+        guard let size = active.size, size.width == 0 || size.height == 0,
+              active.tabCount == titles.count + 1, active.tabCount > 1 else { return [] }
+        var candidates = windows.filter {
+            $0.wid != active.wid && !$0.isFullscreen && (!$0.isOrderedIn || spaceIsOurAnnotation($0))
+                && titles.contains($0.title) && !belongsToAnotherVisibleGroup($0, active, windows)
+        }
+        guard candidates.count == titles.count else { return [] }
+        var result = Set<CGWindowID>()
+        for title in titles {
+            guard let i = candidates.firstIndex(where: { $0.title == title }) else { return [] }
+            result.insert(candidates.remove(at: i).wid)
+        }
+        return result
+    }
+
+    private static func belongsToAnotherVisibleGroup(_ candidate: TabWindow, _ active: TabWindow,
+                                                      _ windows: [TabWindow]) -> Bool {
+        guard let members = candidate.tabbedSiblingWids, members.count > 1,
+              !members.contains(active.wid) else { return false }
+        return windows.contains {
+            members.contains($0.wid) && !$0.isTabbed && ($0.isOrderedIn || hasGenuineSpace($0))
+        }
     }
 
     /// Tabs of one window ARE the parent's frame, so a tab candidate must sit at the active tab's position

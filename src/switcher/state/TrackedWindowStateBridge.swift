@@ -251,6 +251,8 @@ class TrackedWindowStateBridge {
                 if !onlyWhileSwitcherOpen || SwitcherSession.isActive {
                     App.refreshOpenUiAfterExternalEvent(wids.compactMap { Windows.byWindowId[$0] })
                 }
+            case .refreshUiImmediately(let wids):
+                App.refreshOpenUiImmediatelyAfterExternalEvent(wids.compactMap { Windows.byWindowId[$0] })
             case .removeWindow(let wid):
                 if let w = Windows.byWindowId[wid] { Windows.removeWindows([w], true) }
             case .deferCaptureUntilRestoreEnds(let wid):

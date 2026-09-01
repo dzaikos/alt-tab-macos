@@ -10,11 +10,14 @@ giving either source universal authority.
 
 1. WID zero is invalid.
 2. A WindowServer parent is an exact relationship: represent the parent, regardless of level, size or attention.
-3. Exact attention makes a parentless surface a destination even when AX is absent or unconventional.
-4. An AXWindow marked `kAXMain` is a destination.
-5. `AXStandardWindow` is a destination. A titled `AXDialog` is a destination; an untitled one remains latent.
-6. Floating/system-dialog surfaces are auxiliary unless parentage, mainness or attention already established a
-   stronger result.
+3. Exact attention makes a parentless surface a destination even when AX is absent or unconventional, but it
+   cannot override an explicit auxiliary subrole.
+4. Floating/system-dialog surfaces are auxiliary. AppKit can mark a floating panel `kAXMain`; that does not
+   turn the panel into a switch destination. A substantial, titled custom AXWindow at a floating level is also
+   auxiliary unless AX positively identifies it as main; this covers non-activating AppKit panels whose
+   subrole and main flag are unknown.
+5. A non-auxiliary AXWindow marked `kAXMain` is a destination.
+6. `AXStandardWindow` is a destination. A titled `AXDialog` is a destination; an untitled one remains latent.
 7. A substantial, titled AXWindow root is a custom-toolkit destination. This generic rule replaces app-name
    exceptions for Steam, Wine, presentation windows and similar unconventional apps.
 8. Size and level are acquisition priors, not absolute rejection gates. Level-zero surfaces are inspected even

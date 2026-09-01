@@ -298,6 +298,13 @@ class App: AppCenterApplication {
         }
     }
 
+    static func refreshOpenUiImmediatelyAfterExternalEvent(_ windowsToScreenshot: [Window]) {
+        WindowThumbnails.refreshAsync(windowsToScreenshot, .refreshUiAfterExternalEvent)
+        guard SwitcherSession.isActive else { return }
+        if !Windows.updatesBeforeShowing() { hideUi(); return }
+        refreshUi(true)
+    }
+
     static func refreshUi(_ preserveScrollPosition: Bool = false) {
         guard SwitcherSession.isActive else { return }
         let preservedScrollOrigin = preserveScrollPosition ? TilesView.currentScrollOrigin() : nil
@@ -329,9 +336,6 @@ class App: AppCenterApplication {
         if session.isFirstSummon || shortcutIndex != session.shortcutIndex {
             NSScreen.updatePreferred()
             if isVeryFirstSummon {
-                // The last guess before the user looks. With the startup re-seeding above it, this normally
-                // finds nothing to change and draws nothing twice — which is what it was always meant to do.
-                Windows.sortByLevel()
                 Windows.endStartupOrderSeeding()
                 isVeryFirstSummon = false
             }

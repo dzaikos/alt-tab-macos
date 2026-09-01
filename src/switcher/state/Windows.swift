@@ -249,18 +249,27 @@ class Windows {
         let evidence: CurrentWindowDrawEvidence
         switch AttentionEngine.currentUserContext {
         case .window(let identity):
-            evidence = byWindowId[identity.wid].map { .exactWindow(isDrawn: shouldDisplay($0)) } ?? .unknown
+            if let window = byWindowId[identity.wid], !window.isMinimized && !window.isPhantom
+                && !window.isWindowlessApp && !window.isTabbed {
+                evidence = .exactWindow(isDrawn: shouldDisplay(window))
+            } else {
+                evidence = currentWindowDrawEvidence(identity.process.pid)
+            }
         case .application(let process):
-            evidence = .application(list.compactMap {
-                $0.application.pid == process.pid
-                    ? FrontmostAppWindow(visible: shouldDisplay($0), isWindowlessApp: $0.isWindowlessApp,
-                        isPhantom: $0.isPhantom, isMinimized: $0.isMinimized)
-                    : nil
-            })
+            evidence = currentWindowDrawEvidence(process.pid)
         case .unknown:
             evidence = .unknown
         }
         return SelectionResolver.currentWindowIsDrawn(evidence)
+    }
+
+    private static func currentWindowDrawEvidence(_ pid: pid_t) -> CurrentWindowDrawEvidence {
+        .application(list.compactMap {
+            $0.application.pid == pid
+                ? FrontmostAppWindow(visible: shouldDisplay($0), isWindowlessApp: $0.isWindowlessApp,
+                    isPhantom: $0.isPhantom, isMinimized: $0.isMinimized)
+                : nil
+        })
     }
 
     /// Project `list` into the kernel's window view (just the fields selection needs).
@@ -434,10 +443,9 @@ class Windows {
     /// stacking is a guess, and this used to rewrite EVERY window's rank here instead.
     ///
     /// The query BLOCKS, hence the off-main scheduler (#5721), and that is also why it is fired a beat after
-    /// launch and not only on the first summon: called there alone, its answer lands after that summon's
-    /// first render and the user watches the list re-order. Seeded at launch, the first summon's call finds
-    /// nothing to change and the reducer emits no re-render at all; it still runs there, for whatever the
-    /// launch pass could not see yet.
+    /// launch and never on the first summon: called there, its answer lands after that summon's first render
+    /// and the user watches the list re-order. Every in-flight answer re-checks `startupOrderIsAGuess`, so a
+    /// launch query that finishes after the first summon is discarded too.
     /// Coalesces the startup re-seeds. A launch discovers windows in bursts and the stacking query BLOCKS,
     /// so this is one seed at the head of a burst plus one trailing seed when it stops, not one per window.
     private static let startupZOrderThrottler = Throttler(delayInMs: 250)
@@ -473,6 +481,7 @@ class Windows {
 
     static func sortByLevel() {
         CGSCallScheduler.windowsInSpaces(Spaces.visibleSpaces) { wids in   // `thenMain`: already on main
+            guard startupOrderIsAGuess else { return }
             TrackedWindowStateBridge.dispatch(.zOrderRead(widsTopFirst: wids))
         }
     }

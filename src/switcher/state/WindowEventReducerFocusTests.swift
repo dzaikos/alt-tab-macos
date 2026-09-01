@@ -93,6 +93,20 @@ final class WindowEventReducerFocusTests: XCTestCase {
         XCTAssertFalse(effects.contains(.applyFocus(Self.reaperMainWid)))
     }
 
+    func testMinimizingTheFocusedWindowPromotesTheFrontmostAppsNextWindow() {
+        var s = state([
+            window(Self.reaperDialogWid, Self.reaperPid, "Dialog", order: 0),
+            window(Self.finderWid, Self.finderPid, "Liebesleid", order: 1),
+            window(Self.reaperMainWid, Self.reaperPid, "Main", order: 2),
+        ], frontmost: Self.reaperPid)
+        s.carried.offScreen.insert(Self.reaperDialogWid)
+        let snapshot = WsWindowSnapshot(wid: Self.reaperDialogWid, position: CGPoint(x: 10, y: 10),
+            size: CGSize(width: 800, height: 600), isFullscreen: false, isVisible: false, isMinimized: true)
+        let effects = WindowEventReducer.reduce(&s, .windowServerStateRead([snapshot]))
+        XCTAssertTrue(effects.contains(.applyFocus(Self.reaperMainWid)))
+        XCTAssertEqual(s.mruFrontWid, Self.reaperMainWid)
+    }
+
     /// An inactive tab is off screen too — what the user sees is its group's representative.
     func testInactiveTabsAreNotPromoted() {
         let backgroundTab: CGWindowID = 4600
@@ -139,8 +153,10 @@ final class WindowEventReducerFocusTests: XCTestCase {
     /// A committed decision is the one thing that may claim the user moved.
     func testCommittedAttentionMovesTheOrder() {
         var s = twoAppState()
-        _ = WindowEventReducer.reduce(&s, .attentionCommitted(wid: Self.reaperMainWid, observed: Self.reaperMainWid, at: 100))
+        let effects = WindowEventReducer.reduce(&s, .attentionCommitted(wid: Self.reaperMainWid,
+                                                                        observed: Self.reaperMainWid, at: 100))
         XCTAssertEqual(s.mruFrontWid, Self.reaperMainWid)
+        XCTAssertTrue(effects.contains(.refreshUiImmediately(wids: [Self.reaperMainWid, Self.finderWid])))
     }
 
     /// A commit naming a window nobody tracks is ignored rather than fabricating one.
@@ -227,6 +243,53 @@ final class WindowEventReducerFocusTests: XCTestCase {
         let group = s.groups.groupId(of: Self.reaperDialogWid)
         XCTAssertEqual(group.flatMap { s.groups.representativeByGroup[$0] }, Self.reaperDialogWid,
                        "the app said this tab is active; the group still shows the other one")
+        XCTAssertEqual(s.mruFrontWid, Self.reaperDialogWid)
+    }
+
+    func testSemanticFocusCarriesAHeldGroupPastAnAmbiguousPhysicalJoin() {
+        let incomingWid: CGWindowID = 900
+        var s = state([window(Self.reaperMainWid, Self.reaperPid, "Tab A", order: 0),
+                       window(Self.reaperDialogWid, Self.reaperPid, "Tab B", order: 1),
+                       window(incomingWid, Self.reaperPid, "Tab C", order: 2)], frontmost: Self.reaperPid)
+        s.now = 100
+        s.windows[0].spaceIds = []
+        s.windows[0].lastLeftSpaceId = 4
+        s.held.insert(Self.reaperMainWid)
+        _ = s.formGroup([Self.reaperMainWid, Self.reaperDialogWid], representative: Self.reaperMainWid,
+                        reason: "test")
+        _ = WindowEventReducer.reduce(&s, .attentionCommitted(wid: incomingWid, observed: incomingWid, at: 100))
+        XCTAssertEqual(Set(s.groups.siblingWids(of: incomingWid) ?? []),
+                       Set([Self.reaperMainWid, Self.reaperDialogWid, incomingWid]))
+        XCTAssertFalse(s.groups.isTabbed(incomingWid))
+    }
+
+    func testSemanticFocusDoesNotCarryAHeldGroupFromAnotherSpace() {
+        let incomingWid: CGWindowID = 900
+        var s = state([window(Self.reaperMainWid, Self.reaperPid, "Tab A", order: 0),
+                       window(Self.reaperDialogWid, Self.reaperPid, "Tab B", order: 1),
+                       window(incomingWid, Self.reaperPid, "Tab C", order: 2)], frontmost: Self.reaperPid)
+        s.now = 100
+        s.windows[0].spaceIds = []
+        s.windows[0].lastLeftSpaceId = 99
+        s.held.insert(Self.reaperMainWid)
+        _ = s.formGroup([Self.reaperMainWid, Self.reaperDialogWid], representative: Self.reaperMainWid,
+                        reason: "test")
+        _ = WindowEventReducer.reduce(&s, .attentionCommitted(wid: incomingWid, observed: incomingWid, at: 100))
+        XCTAssertNil(s.groups.groupId(of: incomingWid))
+    }
+
+    func testUnrenderableNamedTabKeepsPresentableRepresentativeUntilSized() {
+        var incoming = window(Self.reaperDialogWid, Self.reaperPid, "Tab B", order: 1)
+        incoming.size = .zero
+        var s = state([window(Self.reaperMainWid, Self.reaperPid, "Tab A", order: 0), incoming],
+                      frontmost: Self.reaperPid)
+        s.now = 100
+        _ = s.formGroup([Self.reaperMainWid, Self.reaperDialogWid], representative: Self.reaperMainWid,
+                        reason: "test")
+        _ = WindowEventReducer.reduce(&s, .attentionCommitted(wid: Self.reaperMainWid,
+                                                              observed: Self.reaperDialogWid, at: 100))
+        let group = s.groups.groupId(of: Self.reaperDialogWid)
+        XCTAssertEqual(group.flatMap { s.groups.representativeByGroup[$0] }, Self.reaperMainWid)
         XCTAssertEqual(s.mruFrontWid, Self.reaperDialogWid)
     }
 
