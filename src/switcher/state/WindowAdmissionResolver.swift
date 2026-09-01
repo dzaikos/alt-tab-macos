@@ -113,15 +113,15 @@ enum WindowAdmissionResolver {
         guard physical.wid != 0 else { return .reject(.invalidWindowId) }
         guard physical.parentWid == 0 else { return .represent(parentWid: physical.parentWid, .attachedSurface) }
         if let semantic, isAuxiliary(semantic.subrole) { return .reject(.auxiliarySurface) }
-        if evidence == .attention { return .destination(.exactAttention) }
+        if evidence == .attention { return attentionDecision(physical, semantic) }
         guard let semantic else { return .latent(.awaitingAccessibility) }
+        guard admissiblePlacement(physical, semantic) else { return .reject(.auxiliarySurface) }
         if semantic.isWindowRole && semantic.isMain == true { return .destination(.mainWindow) }
         if semantic.subrole == kAXStandardWindowSubrole { return .destination(.conventionalWindow) }
         if semantic.subrole == kAXDialogSubrole {
             return semantic.hasTitle ? .destination(.conventionalWindow) : .latent(.untitledDialog)
         }
         if semantic.isWindowRole && semantic.hasTitle && physical.isSubstantial {
-            if semantic.isMain != true && physical.level != normalLevel { return .reject(.auxiliarySurface) }
             return .destination(.customWindowRoot)
         }
         guard semantic.isWindowRole else { return .reject(.nonWindowRole) }
@@ -131,5 +131,47 @@ enum WindowAdmissionResolver {
 
     private static func isAuxiliary(_ subrole: String?) -> Bool {
         subrole == kAXFloatingWindowSubrole || subrole == "AXSystemDialog"
+    }
+
+    /// **Above the ordinary window level, a subrole is not authority; `kAXMain` is.** A surface an app places
+    /// over its own document windows is a HUD, a panel, an overlay or a presentation, and only the last of
+    /// those is somewhere to switch to. AppKit reserves `kAXMain` for the one window an app would restore the
+    /// user to, and it survives the app going to the background (measured across Chrome, TextEdit and
+    /// ChatGPT, all reporting `AXMain` true for a background window), so it is a fact about the surface
+    /// rather than about who is in front.
+    ///
+    /// The subrole cannot do this job. ChatGPT's dictation strip is a 720x84 bar at level 3 that Chromium
+    /// describes as a titled `AXDialog`, and its floating sidebar as `AXStandardWindow`; the same two
+    /// subroles name the ordinary windows of every AppKit app. Gating them by placement is what separates
+    /// them, and it is why this is one rule over every subrole instead of a list of the ones caught so far
+    /// (#5565).
+    ///
+    /// Covering the screen is the other positive vouch: a fullscreen surface is where the user already is,
+    /// whatever level the WindowServer parks it at.
+    private static func admissiblePlacement(_ physical: PhysicalSurface, _ semantic: SemanticSurface?) -> Bool {
+        physical.level == normalLevel || physical.isFullscreen || semantic?.isMain == true
+    }
+
+    /// **Exact attention fills a silence; it does not overrule an answer.** Both channels that reach here read
+    /// `kAXFocusedWindow`, the app's own focus notification and the activation read, and that attribute names
+    /// floating panels and borderless HUDs where `kAXMain` names neither, measured across ~100 installed apps
+    /// in #5983. So attention is evidence about where focus went, never about what the surface IS.
+    ///
+    /// Which is why `admissiblePlacement` binds here too, and it is the whole reason the gate holds. An app
+    /// that key-focuses its own HUD reaches attention exactly as a real window does — ChatGPT's dictation
+    /// strip takes focus the moment it appears — so a placement rule that discovery applied and attention did
+    /// not would only delay the surface by one focus event.
+    ///
+    /// What attention does buy is the benefit of the doubt on meaning. A role that is not a window still
+    /// refuses it: that is the flattest refusal accessibility can make, and a surface the app calls a group is
+    /// not a switch destination however the focus got there. A role it FAILED to read is not that refusal — a
+    /// nil role is the absence of an answer, and reading absence as a verdict is the mistake
+    /// `WindowElementAcquisition` exists to prevent.
+    private static func attentionDecision(_ physical: PhysicalSurface,
+                                          _ semantic: SemanticSurface?) -> SwitchDestinationDecision {
+        guard admissiblePlacement(physical, semantic) else { return .reject(.auxiliarySurface) }
+        guard let semantic else { return .destination(.exactAttention) }
+        guard semantic.role == nil || semantic.isWindowRole else { return .reject(.nonWindowRole) }
+        return .destination(.exactAttention)
     }
 }

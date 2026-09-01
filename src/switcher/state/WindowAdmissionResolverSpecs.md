@@ -10,19 +10,23 @@ giving either source universal authority.
 
 1. WID zero is invalid.
 2. A WindowServer parent is an exact relationship: represent the parent, regardless of level, size or attention.
-3. Exact attention makes a parentless surface a destination even when AX is absent or unconventional, but it
-   cannot override an explicit auxiliary subrole.
-4. Floating/system-dialog surfaces are auxiliary. AppKit can mark a floating panel `kAXMain`; that does not
-   turn the panel into a switch destination. A substantial, titled custom AXWindow at a floating level is also
-   auxiliary unless AX positively identifies it as main; this covers non-activating AppKit panels whose
-   subrole and main flag are unknown.
-5. A non-auxiliary AXWindow marked `kAXMain` is a destination.
-6. `AXStandardWindow` is a destination. A titled `AXDialog` is a destination; an untitled one remains latent.
-7. A substantial, titled AXWindow root is a custom-toolkit destination. This generic rule replaces app-name
+3. **Placement gates every surface, on every channel.** A destination sits at the ordinary window level or
+   covers the screen, unless AX positively marks it `kAXMain`. Above that level an app puts its HUDs, panels
+   and overlays, and no subrole distinguishes them: Chromium describes ChatGPT's dictation strip as a titled
+   `AXDialog` and its sidebar as `AXStandardWindow`, the same subroles every ordinary AppKit window carries.
+   The gate binds exact attention too, because an app key-focuses its own HUD through `kAXFocusedWindow`
+   exactly as a real window does, so gating only discovery would delay the surface by one focus event.
+4. Exact attention makes a parentless, admissibly-placed surface a destination even when AX is absent or
+   unconventional, but it cannot override an auxiliary subrole or a role that is not a window.
+5. Floating/system-dialog subroles are auxiliary. AppKit can mark a floating panel `kAXMain`; that does not
+   turn the panel into a switch destination.
+6. A non-auxiliary AXWindow marked `kAXMain` is a destination.
+7. `AXStandardWindow` is a destination. A titled `AXDialog` is a destination; an untitled one remains latent.
+8. A substantial, titled AXWindow root is a custom-toolkit destination. This generic rule replaces app-name
    exceptions for Steam, Wine, presentation windows and similar unconventional apps.
-8. Size and level are acquisition priors, not absolute rejection gates. Level-zero surfaces are inspected even
-   when small; substantial surfaces are inspected at every level; exact attention bypasses the optimization.
-9. A result is recomputed whenever semantic evidence is refreshed. No acceptance or rejection is permanent.
+9. Size is an acquisition prior, never a rejection gate: level-zero surfaces are inspected even when small,
+   substantial surfaces are inspected at every level, and exact attention bypasses the optimization.
+10. A result is recomputed whenever semantic evidence is refreshed. No acceptance or rejection is permanent.
 
 ## Boundaries
 

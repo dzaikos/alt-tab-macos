@@ -608,7 +608,9 @@ class Windows {
     /// an unrelated background tab claim itself.
     ///
     /// Parentage is resolved first; the parentless surface is admitted because exact attention itself is the
-    /// behavioral evidence. Level and size cannot veto an interaction the user actually performed.
+    /// behavioral evidence. Size cannot veto an interaction the user actually performed; placement does,
+    /// because an app key-focuses its own HUD exactly as it focuses a window. See
+    /// `WindowAdmissionResolver.admissiblePlacement`.
     @discardableResult
     static func findOrCreateCandidate(_ raw: WsRawWindow, _ app: Application) -> Window? {
         let representativeWid = WindowSurfaceInventory.representativeWid(raw.wid)
@@ -621,13 +623,38 @@ class Windows {
             return existing
         }
         let decision = WindowAdmissionResolver.resolve(PhysicalSurface(raw), nil, evidence: .attention)
-        guard decision.isDestination else { return nil }
+        guard decision.isDestination else {
+            logAdmission(decision, raw, app)
+            return nil
+        }
         let window = Window(nil, app, raw.wid, raw.title.isEmpty ? nil : raw.title,
             WsWindowState.isFullscreen(raw), WsWindowState.isMinimized(raw),
             raw.bounds.origin, raw.bounds.size, .attentionCandidate, .attention)
         appendWindow(window)
         logAdmission(decision, raw, app)
         return window
+    }
+
+    /// **Attention buys time for accessibility to catch up. This is where the loan is called in.**
+    ///
+    /// A window held on attention alone has never once been described, and the sweep has now failed to
+    /// acquire it `SurfaceAcquisitionPolicy.maxAttemptsPerSituation` times at one unchanged app window set,
+    /// which is the point it stops paying for the surface. Without this, "focus went there" stood for the
+    /// life of the wid with nothing able to contradict it — the shape that kept an undescribable HUD in the
+    /// list for good.
+    ///
+    /// **Only an admission with no element is dropped.** A window described even once is not held on
+    /// attention, so an app that wedges LATER keeps every window it had, and the app itself stays reachable
+    /// because losing its last window restores its icon placeholder. Both are pinned live by the QA suite's
+    /// WL-11 and WL-12, and this rule's own three shapes by its WL-19, WL-20 and WL-21.
+    ///
+    /// Not permanent either. The failure record is keyed to the app's window set, so any window or tab change
+    /// asks again, and the app's own focus notification re-admits the surface the moment it can speak.
+    static func dropUndescribedAttentionAdmission(_ wid: CGWindowID) {
+        guard let window = byWindowId[wid], window.axUiElement == nil,
+              window.admissionEvidence == .attention, window.axStatus == .attentionCandidate else { return }
+        Logger.debug { "surface not admitted \(window.application.debugId) wid:\(wid) reason:neverDescribed" }
+        removeWindows([window], true)
     }
 
     /// AX finally answered for a window that was kept on WindowServer evidence alone. Nothing about the

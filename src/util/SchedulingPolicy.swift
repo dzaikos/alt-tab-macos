@@ -124,4 +124,14 @@ enum SurfaceAcquisitionPolicy {
     static func attemptsAfterFailure(previousAttempts: Int, sameSituation: Bool) -> Int {
         (sameSituation ? previousAttempts : 0) + 1
     }
+
+    /// Whether the sweep has now DEFINITIVELY given up on a surface, as opposed to merely being between
+    /// tries. `shouldAttempt` answers "ask again?"; this answers "will anything ever describe it, at this
+    /// arrangement?", which is the question an admission resting on attention alone has been waiting on.
+    ///
+    /// Same threshold, deliberately: the give-up point must be the moment the sweep stops paying for the
+    /// surface, or a caller could act on a verdict the sweep had not reached yet.
+    static func hasGivenUp(attempts: Int) -> Bool {
+        attempts >= maxAttemptsPerSituation
+    }
 }

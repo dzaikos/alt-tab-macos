@@ -35,8 +35,11 @@ class Applications {
 
     static func noteAcquisitionFailed(_ wid: CGWindowID, _ pid: pid_t, _ situation: UInt64) {
         let previous = failedAcquisitions[wid]
-        failedAcquisitions[wid] = (pid, situation, SurfaceAcquisitionPolicy.attemptsAfterFailure(
-            previousAttempts: previous?.attempts ?? 0, sameSituation: previous?.situation == situation))
+        let attempts = SurfaceAcquisitionPolicy.attemptsAfterFailure(
+            previousAttempts: previous?.attempts ?? 0, sameSituation: previous?.situation == situation)
+        failedAcquisitions[wid] = (pid, situation, attempts)
+        guard SurfaceAcquisitionPolicy.hasGivenUp(attempts: attempts) else { return }
+        Windows.dropUndescribedAttentionAdmission(wid)
     }
 
     static func forgetAcquisitionFailure(_ wid: CGWindowID) {

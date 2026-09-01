@@ -158,4 +158,26 @@ final class SchedulingPolicyTests: XCTestCase {
         XCTAssertEqual(SurfaceAcquisitionPolicy.attemptsAfterFailure(previousAttempts: 2, sameSituation: true), 3)
         XCTAssertEqual(SurfaceAcquisitionPolicy.attemptsAfterFailure(previousAttempts: 2, sameSituation: false), 1)
     }
+
+    /// a busy app is still inside its budget, so nothing that waits on the give-up verdict may act yet
+    func testGivingUpDoesNotHappenWhileTriesRemain() {
+        for spent in 0..<SurfaceAcquisitionPolicy.maxAttemptsPerSituation {
+            XCTAssertFalse(SurfaceAcquisitionPolicy.hasGivenUp(attempts: spent))
+        }
+    }
+
+    /// giving up is the same moment the sweep stops paying, never a later one: a caller must not act on a
+    /// verdict the sweep has not reached
+    func testGivingUpIsExactlyWhereTheSweepStops() {
+        XCTAssertTrue(SurfaceAcquisitionPolicy.hasGivenUp(attempts: SurfaceAcquisitionPolicy.maxAttemptsPerSituation))
+        XCTAssertFalse(SurfaceAcquisitionPolicy.shouldAttempt(recordedSituation: 7,
+            attempts: SurfaceAcquisitionPolicy.maxAttemptsPerSituation, situation: 7))
+    }
+
+    /// a new window set restarts the budget, so the app is not permanently condemned by one bad arrangement:
+    /// `hasGivenUp` reads the count the caller just stored, and that count resets with the situation
+    func testGivingUpIsUndoneByANewSituation() {
+        let afterReset = SurfaceAcquisitionPolicy.attemptsAfterFailure(previousAttempts: 99, sameSituation: false)
+        XCTAssertFalse(SurfaceAcquisitionPolicy.hasGivenUp(attempts: afterReset))
+    }
 }
