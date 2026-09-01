@@ -78,6 +78,9 @@
 		5E5EA12E0000000000000003 /* KeyRepeatTimerTestable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5EA12E0000000000000001 /* KeyRepeatTimerTestable.swift */; };
 		5E5EA12E0000000000000102 /* KeyRepeatTimerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5EA12E0000000000000101 /* KeyRepeatTimerTests.swift */; };
 		5F117E40000000000000F002 /* WindowFilterResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F117E40000000000000F001 /* WindowFilterResolver.swift */; };
+		5F117E40000000000000E002 /* TabReadPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F117E40000000000000E001 /* TabReadPolicy.swift */; };
+		5F117E40000000000000E003 /* TabReadPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F117E40000000000000E001 /* TabReadPolicy.swift */; };
+		5F117E40000000000000E102 /* TabReadPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F117E40000000000000E101 /* TabReadPolicyTests.swift */; };
 		5F117E40000000000000F003 /* WindowFilterResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F117E40000000000000F001 /* WindowFilterResolver.swift */; };
 		5F117E40000000000000F102 /* WindowFilterResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F117E40000000000000F101 /* WindowFilterResolverTests.swift */; };
 		5A220000000000000000A002 /* WindowAdmissionResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A220000000000000000A001 /* WindowAdmissionResolver.swift */; };
@@ -494,6 +497,8 @@
 		5E5EA12E0000000000000001 /* KeyRepeatTimerTestable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyRepeatTimerTestable.swift; sourceTree = "<group>"; };
 		5E5EA12E0000000000000101 /* KeyRepeatTimerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyRepeatTimerTests.swift; sourceTree = "<group>"; };
 		5F117E40000000000000F001 /* WindowFilterResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowFilterResolver.swift; sourceTree = "<group>"; };
+		5F117E40000000000000E001 /* TabReadPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabReadPolicy.swift; sourceTree = "<group>"; };
+		5F117E40000000000000E101 /* TabReadPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabReadPolicyTests.swift; sourceTree = "<group>"; };
 		5F117E40000000000000F101 /* WindowFilterResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowFilterResolverTests.swift; sourceTree = "<group>"; };
 		5A220000000000000000A001 /* WindowAdmissionResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowAdmissionResolver.swift; sourceTree = "<group>"; };
 		5A220000000000000000A101 /* WindowAdmissionResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowAdmissionResolverTests.swift; sourceTree = "<group>"; };
@@ -1116,6 +1121,7 @@
 				5E5EA12C0000000000000001 /* SearchModeResolver.swift */,
 				5E5EA12D0000000000000001 /* ShortcutModifierResolver.swift */,
 				5F117E40000000000000F001 /* WindowFilterResolver.swift */,
+				5F117E40000000000000E001 /* TabReadPolicy.swift */,
 				5F117E41000000000000F001 /* PhantomWindowDetector.swift */,
 				5E7C0F70000000000000E001 /* ExceptionMatcher.swift */,
 				5E0DE2A0000000000000D001 /* WindowOrderResolver.swift */,
@@ -1131,6 +1137,7 @@
 				5F5849B100000000000000B1 /* WindowEventReducerFocusTests.swift */,
 				5F5849B100000000000000C1 /* WindowEventReducerMinimizeTests.swift */,
 				5F117E40000000000000F101 /* WindowFilterResolverTests.swift */,
+				5F117E40000000000000E101 /* TabReadPolicyTests.swift */,
 				5F117E41000000000000F101 /* PhantomWindowDetectorTests.swift */,
 				5E7C0F70000000000000E101 /* ExceptionMatcherTests.swift */,
 				5E0DE2A0000000000000D101 /* WindowOrderResolverTests.swift */,
@@ -2086,6 +2093,8 @@
 				5E5EA12E0000000000000102 /* KeyRepeatTimerTests.swift in Sources */,
 				5F117E40000000000000F003 /* WindowFilterResolver.swift in Sources */,
 				5F117E40000000000000F102 /* WindowFilterResolverTests.swift in Sources */,
+				5F117E40000000000000E003 /* TabReadPolicy.swift in Sources */,
+				5F117E40000000000000E102 /* TabReadPolicyTests.swift in Sources */,
 				5A220000000000000000A003 /* WindowAdmissionResolver.swift in Sources */,
 				5A220000000000000000A102 /* WindowAdmissionResolverTests.swift in Sources */,
 				5A220000000000000000B003 /* WindowSurfaceInventory.swift in Sources */,
@@ -2179,6 +2188,7 @@
 				5F5849A900000000000000A2 /* BruteForceWindowMatch.swift in Sources */,
 				5E5EA12E0000000000000002 /* KeyRepeatTimerTestable.swift in Sources */,
 				5F117E40000000000000F002 /* WindowFilterResolver.swift in Sources */,
+				5F117E40000000000000E002 /* TabReadPolicy.swift in Sources */,
 				5A220000000000000000A002 /* WindowAdmissionResolver.swift in Sources */,
 				5A220000000000000000B002 /* WindowSurfaceInventory.swift in Sources */,
 				5F117E41000000000000F002 /* PhantomWindowDetector.swift in Sources */,

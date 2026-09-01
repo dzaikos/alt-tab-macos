@@ -6,8 +6,23 @@ import Cocoa
 enum WindowSurfaceInventory {
     private(set) static var byWindowId = [CGWindowID: WsRawWindow]()
 
+    /// Whether a whole-machine sweep has ever landed here. Until it has, this holds only the handful of rows
+    /// single-window discoveries happened to upsert, so it cannot answer "what else does this app have on
+    /// screen?" — a question `Applications.discoverInactiveTabs` must not get a partial answer to (an empty
+    /// `others` waves every candidate through). After the first `replace` it is a SUPERSET of the on-screen
+    /// list: every app-level surface on every Space, not just the current one.
+    private(set) static var hasFullSnapshot = false
+
     static func replace(_ rows: [WsRawWindow]) {
         byWindowId = Dictionary(uniqueKeysWithValues: rows.map { ($0.wid, $0) })
+        hasFullSnapshot = true
+    }
+
+    /// The visible surfaces of one process, for the callers that need to reason about an app's own window
+    /// layout. Returns nil before the first full sweep rather than a misleadingly short list.
+    static func visibleSurfaces(pid: pid_t) -> [WsRawWindow]? {
+        guard hasFullSnapshot else { return nil }
+        return byWindowId.values.filter { $0.pid == pid && WsWindowState.isVisible($0) }
     }
 
     static func upsert(_ rows: [WsRawWindow]) {

@@ -52,9 +52,12 @@ extension NSScreen {
         return Screens.all[screenId] ?? NSScreen.withActiveMenubar()
     }
 
-    /// there is only 1 active menubar. Other screens will show their menubar dimmed
+    /// there is only 1 active menubar. Other screens will show their menubar dimmed.
+    /// The identifier is hoisted out of the predicate: it does not vary per screen, and inside `first { }` it
+    /// was a synchronous WindowServer round trip PER SCREEN, on the main thread, on the show path.
     static func withActiveMenubar() -> NSScreen? {
-        return NSScreen.screens.first { CGSCopyActiveMenuBarDisplayIdentifier(CGS_CONNECTION) == $0.cachedUuid() }
+        let activeMenubarUuid = CGSCopyActiveMenuBarDisplayIdentifier(CGS_CONNECTION)
+        return NSScreen.screens.first { activeMenubarUuid == $0.cachedUuid() }
     }
 
     static func withMouse() -> NSScreen? {

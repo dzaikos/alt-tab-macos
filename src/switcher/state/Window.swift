@@ -462,13 +462,24 @@ class Window {
         }
     }
 
-    // for some windows (e.g. Slack), the AX API doesn't return a title; we try CG API; finally we resort to the app name
+    /// For some windows (e.g. Slack) the AX API returns no title, so we fall back to the WindowServer's, and
+    /// finally to the app name.
+    ///
+    /// The WindowServer title is taken from the inventory snapshot rather than asked for: this runs on the
+    /// MAIN thread (`Window.init`, and the apply half of every title read), where `CGSCopyWindowProperty` is a
+    /// synchronous WindowServer round trip on the show path — and the batched query that fills the inventory
+    /// already fetched exactly this string (`SLSWindowIteratorCopyTitle`), refreshed on every geometry event.
+    /// The live call remains for a wid the inventory has no row for, so nothing that used to resolve stops.
     func bestEffortTitle(_ axTitle: String?) -> String {
         if let axTitle, !axTitle.isEmpty {
             return axTitle
         }
-        if let cgWindowId, let cgTitle = cgWindowId.title(), !cgTitle.isEmpty {
-            return cgTitle
+        if let cgWindowId {
+            if let row = WindowSurfaceInventory.raw(cgWindowId) {
+                if !row.title.isEmpty { return row.title }
+            } else if let cgTitle = cgWindowId.title(), !cgTitle.isEmpty {
+                return cgTitle
+            }
         }
         return application.localizedName ?? ""
     }

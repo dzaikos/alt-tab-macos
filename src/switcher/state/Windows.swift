@@ -637,9 +637,24 @@ class Windows {
         window.admissionEvidence = .attention
     }
 
+    /// Bumped whenever an app gains or loses a window. A tab open, close, tear-off or merge all move it, so
+    /// it is what `TabReadPolicy` compares against to decide whether a window's tab grouping may be stale —
+    /// a monotonic version rather than a window count, because closing one tab and opening another between
+    /// two shows leaves the count unchanged.
+    private(set) static var appWindowSetVersion = [pid_t: UInt64]()
+
+    static func bumpAppWindowSetVersion(_ pid: pid_t) {
+        appWindowSetVersion[pid, default: 0] &+= 1
+    }
+
+    static func forgetAppWindowSetVersion(_ pid: pid_t) {
+        appWindowSetVersion[pid] = nil
+    }
+
     static func appendWindow(_ window: Window) {
         window.lastFocusOrder = list.count
         list.append(window)
+        bumpAppWindowSetVersion(window.application.pid)
         if let wid = window.cgWindowId {
             byWindowId[wid] = window
             WindowServerEvents.subscribe(wid)
@@ -707,10 +722,18 @@ class Windows {
             }
         }
         for w in windows {
+            bumpAppWindowSetVersion(w.application.pid)
             if let wid = w.cgWindowId {
                 AXCallScheduler.shared.removeEntries(withPrefix: "wid-\(wid)-")
+                // Both key SHAPES this throttler holds for a window: `<wid>-generic` / `<wid>-title` written
+                // by the attribute reads, and `wid-<wid>-discover` / `wid-<wid>-wsstate` written by the
+                // bridge. Pruning only the first shape left the second accumulating for the whole session.
                 Applications.windowAttributesThrottler.removeEntries(withPrefix: "\(wid)-")
+                Applications.windowAttributesThrottler.removeEntries(withPrefix: "wid-\(wid)-")
+                // likewise both capture resolutions: the full-res Preview fetch keys on `preview-`
                 Applications.screenshotThrottler.removeEntry(withKey: "capture-wid-\(wid)")
+                Applications.screenshotThrottler.removeEntry(withKey: "preview-wid-\(wid)")
+                Applications.forgetTabRead(wid)
             }
             // when a tabbed window is removed, its group shrinks (or dissolves) in the registry
             if let wid = w.cgWindowId {

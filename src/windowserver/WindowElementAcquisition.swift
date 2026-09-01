@@ -6,20 +6,45 @@ import Cocoa
 /// the remote-token brute-force for other-Space ones. Mach IPC; call off the main thread. No Specs/Tests
 /// triad (impure — verified at runtime). See README.md.
 enum WindowElementAcquisition {
+    /// **"Not found" and "could not ask" are different answers**, and one caller condemns a window on the
+    /// first (`Applications.removeIfClosedAfterOrderOut`). Collapsing them into `nil` meant a busy app that
+    /// failed to answer `kAXWindows` looked exactly like an app reporting the window gone, so a live window
+    /// was removed from the switcher — the same mistake as reading a failed attribute read as "no role".
+    enum Outcome: Equatable {
+        /// the app listed its windows and this wid is among them
+        case found(AXUIElement)
+        /// the app answered, and this wid is NOT one of its windows: real evidence the window is gone
+        case absent
+        /// the app did not answer at all. No evidence either way; the caller must retry, never condemn.
+        case noAnswer
+    }
+
     static func element(for wid: CGWindowID, pid: pid_t, route: WindowAcquisitionPolicy.Route) -> AXUIElement? {
+        if case let .found(element) = outcome(for: wid, pid: pid, route: route) { return element }
+        return nil
+    }
+
+    static func outcome(for wid: CGWindowID, pid: pid_t, route: WindowAcquisitionPolicy.Route) -> Outcome {
         let app = AXUIElementCreateApplication(pid)
         // Current Space first: the cheap `kAXWindows` read resolves the wid with no brute-force — the common
         // case, since most newly-discovered windows are on the active Space. The own-process read is routed to
         // main (own-process AX is an in-process AppKit call, not IPC; off-main it races AppKit teardown).
-        let currentSpace = AXUIElement.onCorrectThread(pid: pid) { try? app.windows() }
+        // `windows()` THROWS when the app did not answer, which is what separates `.absent` from `.noAnswer`.
+        var appAnswered = true
+        let currentSpace = AXUIElement.onCorrectThread(pid: pid) { () -> [AXUIElement]? in
+            do { return try app.windows() } catch { appAnswered = false; return nil }
+        }
         if let found = currentSpace?.first(where: { (try? $0.cgWindowId()) == wid }) {
-            return found
+            return .found(found)
         }
         // Other Space: the only path is the targeted remote-token brute-force. Skipped for the current-Space
         // -only route and for our own process (always current-Space, and off-main AX on self would crash).
-        guard route == .otherSpaceViaBruteForce, pid != AXUIElement.currentProcessPid else { return nil }
-        let result = AXUIElement.windowByBruteForce(pid, wid)
-        if result == nil { Logger.debug { "AX unavailable for physical surface (pid:\(pid) wid:\(wid))" } }
-        return result
+        guard route == .otherSpaceViaBruteForce, pid != AXUIElement.currentProcessPid else {
+            return appAnswered ? .absent : .noAnswer
+        }
+        if let result = AXUIElement.windowByBruteForce(pid, wid) { return .found(result) }
+        Logger.debug { "AX unavailable for physical surface (pid:\(pid) wid:\(wid))" }
+        // The sweep is time-budgeted, so exhausting it is not proof the window is gone either.
+        return .noAnswer
     }
 }

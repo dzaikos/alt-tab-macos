@@ -185,6 +185,31 @@ class TrackedWindowStateBridge {
         }
     }
 
+    /// Wids awaiting a WindowServer state query, and whether a flush is already booked for this runloop turn.
+    /// Main-thread only, like everything else here.
+    private static var pendingWsStateWids = Set<CGWindowID>()
+    private static var wsStateFlushScheduled = false
+
+    /// **One query per runloop turn, not one per window.** The per-wid throttle above coalesces a window
+    /// self-flooding (a resize drag); it does nothing for a burst ACROSS windows, which is the shape a Space
+    /// switch, a display wake and an app un-hide all take — every window emits its own order-in in the same
+    /// turn. Each used to become its own `SLSWindowQueryWindows`, its own hop back to main, its own reducer
+    /// dispatch and its own possible UI reconcile. The query is batched by nature (it takes an array and the
+    /// iterator getters read the local snapshot), and it is measured at ~27ms while the WindowServer is busy
+    /// with a Space transition — so 50 windows meant ~50 × 27ms of a 4-wide lane, competing with the very
+    /// Space read the summon itself needs.
+    private static func queueWindowServerStateQuery(_ wids: [CGWindowID]) {
+        pendingWsStateWids.formUnion(wids)
+        guard !wsStateFlushScheduled else { return }
+        wsStateFlushScheduled = true
+        DispatchQueue.main.async {
+            wsStateFlushScheduled = false
+            let batch = Array(pendingWsStateWids)
+            pendingWsStateWids.removeAll(keepingCapacity: true)
+            Applications.updateWindowStatesViaWindowServer(batch)
+        }
+    }
+
     /// Execute the reducer's effect list with the same calls the adapters used to make inline — the
     /// throttlers/schedulers those calls contain keep doing the coalescing they always did.
     static func execute(_ effects: [ReducerEffect]) {
@@ -207,10 +232,10 @@ class TrackedWindowStateBridge {
             case .queryWindowServerState(let wids, let throttled):
                 if throttled, let wid = wids.first {
                     Applications.windowAttributesThrottler.throttleOrProceed(key: "wid-\(wid)-wsstate") {
-                        Applications.updateWindowStatesViaWindowServer(wids)
+                        queueWindowServerStateQuery([wid])
                     }
                 } else {
-                    Applications.updateWindowStatesViaWindowServer(wids)
+                    queueWindowServerStateQuery(wids)
                 }
             case .discoverInactiveTabs(let pid, let untrackedTitles, let requesterWid):
                 if let app = Applications.list.first(where: { $0.pid == pid }) {
