@@ -37,10 +37,11 @@ The AX↔wid bridge is strictly one-directional (`_AXUIElementGetWindow` is elem
 resolved by the target app; there is no reverse routine, no window-by-id parameterized attribute, and the
 remote token carries an opaque app-internal id, not a wid — all RE-confirmed). So an AX element for an
 other-Space window can only be obtained by enumerate-and-match (the `_AXUIElementCreateWithRemoteToken`
-brute-force). Elements are therefore acquired (by `WindowElementAcquisition`) **lazily, per newly-discovered
-wid, and cached** — current-Space via `kAXWindows`, other-Space via a targeted brute-force. A window backed
-only by an exact attention signal plus its WindowServer row can still be shown and focused; actions needing
-an AX element self-heal after acquisition succeeds.
+brute-force). Elements are therefore acquired lazily and cached. The periodic inventory groups every missing
+wid by process: one `kAXWindows` read resolves its current-Space subset, then one targeted brute-force shares
+a 250ms budget across the remaining set. Exact event-driven discovery still asks for one wid. A window backed
+only by an exact attention signal plus its WindowServer row can still be shown and focused; actions needing an
+AX element self-heal after acquisition succeeds.
 
 ## Pure vs impure
 

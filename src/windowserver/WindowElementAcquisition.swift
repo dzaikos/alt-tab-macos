@@ -3,7 +3,8 @@ import Cocoa
 /// Impure executor for `WindowAcquisitionPolicy`: resolve an `AXUIElement` for a WindowServer-discovered wid.
 /// There is no wid->element API (RE-confirmed: the AX↔wid bridge is one-directional), so this enumerates the
 /// owning app's window elements and matches by wid — the cheap `kAXWindows` read for current-Space windows,
-/// the remote-token brute-force for other-Space ones. Mach IPC; call off the main thread. No Specs/Tests
+/// the remote-token brute-force for other-Space ones. The inventory batches all requested wids of one process
+/// through both reads; event paths can still ask for one. Mach IPC; call off the main thread. No Specs/Tests
 /// triad (impure — verified at runtime). See README.md.
 enum WindowElementAcquisition {
     /// **"Not found" and "could not ask" are different answers**, and one caller condemns a window on the
@@ -17,6 +18,36 @@ enum WindowElementAcquisition {
         case absent
         /// the app did not answer at all. No evidence either way; the caller must retry, never condemn.
         case noAnswer
+    }
+
+    /// Resolve one inventory pass's complete wid set for a process. `kAXWindows` is read once, then every wid
+    /// it did not publish shares one remote-token traversal and one 250ms budget. Missing entries are not an
+    /// absence verdict: the traversal is time-bounded, so the caller retains its existing retry policy.
+    /// Takes the WindowServer rows rather than bare wids so the unresolved log can name each surface's level
+    /// and tags: a repeatedly-unresolved surface is triaged by what it IS, and those two fields separate
+    /// desktop furniture from a window the sweep is failing to reach.
+    static func elements(for rows: [WsRawWindow], pid: pid_t,
+                         route: WindowAcquisitionPolicy.Route) -> [CGWindowID: AXUIElement] {
+        let wids = Set(rows.map { $0.wid })
+        guard !wids.isEmpty else { return [:] }
+        let app = AXUIElementCreateApplication(pid)
+        let currentSpace = AXUIElement.onCorrectThread(pid: pid) { (try? app.windows()) ?? [] }
+        var found = [CGWindowID: AXUIElement]()
+        found.reserveCapacity(wids.count)
+        for element in currentSpace {
+            guard let wid = try? element.cgWindowId(), wids.contains(wid) else { continue }
+            found[wid] = element
+        }
+        guard route == .otherSpaceViaBruteForce, pid != AXUIElement.currentProcessPid else { return found }
+        let missing = wids.subtracting(Set(found.keys))
+        found.merge(AXUIElement.windowsByBruteForce(pid, missing)) { current, _ in current }
+        let unresolved = rows.filter { found[$0.wid] == nil }.sorted { $0.wid < $1.wid }
+        if !unresolved.isEmpty {
+            Logger.debug { "AX unavailable for physical surfaces (pid:\(pid) "
+                + unresolved.map { "wid:\($0.wid) level:\($0.level) tags:0x\(String($0.tags, radix: 16))" }
+                    .joined(separator: " ") + ")" }
+        }
+        return found
     }
 
     static func element(for wid: CGWindowID, pid: pid_t, route: WindowAcquisitionPolicy.Route) -> AXUIElement? {

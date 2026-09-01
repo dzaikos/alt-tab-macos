@@ -77,7 +77,9 @@ class Preferences {
     }()
 
     // system preferences
-    static var finderShowsQuitMenuItem: Bool { UserDefaults(suiteName: "com.apple.Finder")?.bool(forKey: "QuitMenuItem") ?? false }
+    static var finderShowsQuitMenuItem: Bool {
+        UserDefaults(suiteName: "com.apple.Finder")?.bool(forKey: "QuitMenuItem") ?? false
+    }
     static let staticShortcutKeys = [
         "focusWindowShortcut", "previousWindowShortcut", "cancelShortcut", "closeWindowShortcut",
         "minDeminWindowShortcut", "toggleFullscreenWindowShortcut", "quitAppShortcut", "hideShowAppShortcut", "searchShortcut",
@@ -438,6 +440,9 @@ class Preferences {
     }
 }
 
+/// **The cache is there because `UserDefaults` is IPC.** Every miss is a round trip to cfprefsd, and the
+/// switcher reads dozens of preferences per show, so what reaches `UserDefaults` from here is what this
+/// class failed to absorb.
 class CachedUserDefaults {
     static var cache = ConcurrentMap<String, Any>()
 

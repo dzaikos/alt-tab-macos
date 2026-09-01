@@ -30,12 +30,27 @@ extension AXUIElement {
         throw result == .cannotComplete ? AxError.appUnresponsive : AxError.noAnswer
     }
 
+    /// **The only place `AXObserverAddNotification` is called.**
+    ///
+    /// `subscribeToNotification` below collapses every failure into a Bool or a throw, which suits its
+    /// callers and does not suit `AxObserverRegistry`, whose health policy keys on the exact `AXError` (a
+    /// per-notification `notificationUnsupported` must not mark the whole observer unhealthy). Both shapes
+    /// go through here.
+    ///
+    /// Worth knowing when reading its count: the cost is per FIRST call to a process (~25ms, the
+    /// accessibility handshake), and ~0.1ms for every further registration on the same observer and element.
+    /// So the total tracks how many apps are subscribed, not how many notifications each one takes.
+    func addNotification(_ axObserver: AXObserver, _ notification: String,
+                         _ refcon: UnsafeMutableRawPointer? = nil) -> AXError {
+        AXObserverAddNotification(axObserver, self, notification as CFString, refcon)
+    }
+
     @discardableResult
     func subscribeToNotification(_ axObserver: AXObserver, _ notification: String, _ refcon: UnsafeMutableRawPointer? = nil) throws -> Bool {
         // `refcon` is handed back verbatim to the AX callback for every delivery of this (element,
         // notification) pair. The only remaining caller is DockEvents (Mission Control), which passes nil;
         // the packed-(pid, wid) refcon scheme this supported went away with the per-window AX observers.
-        let result = AXObserverAddNotification(axObserver, self, notification as CFString, refcon)
+        let result = addNotification(axObserver, notification, refcon)
         if result == .success || result == .notificationAlreadyRegistered {
             return true
         }
@@ -78,9 +93,8 @@ extension AXUIElement {
         return bytePtr?.withMemoryRebound(to: AXUIElementID.self, capacity: 1) { $0.pointee }
     }
 
-    func cgWindowId(bucket: AxCallCounter.Bucket = .widLookup) throws -> CGWindowID {
+    func cgWindowId() throws -> CGWindowID {
         var id = CGWindowID(0)
-        AxCallCounter.count(bucket)
         try throwIfNotSuccess(_AXUIElementGetWindow(self, &id))
         return id
     }
@@ -103,16 +117,14 @@ extension AXUIElement {
     /// late or never — apps like Finder retain the CGWindow for seconds-to-forever after closing the window,
     /// but the AX element dies within ~20ms. Own-process read routed to main (see `onCorrectThread(pid:_:)`).
     func liveness(pid: pid_t) -> AXError {
-        AxCallCounter.count(.liveness)
-        return Self.onCorrectThread(pid: pid) {
+        Self.onCorrectThread(pid: pid) {
             var value: CFTypeRef?
             return AXUIElementCopyAttributeValue(self, kAXRoleAttribute as CFString, &value)
         }
     }
 
-    func attributes(_ keys: [String], bucket: AxCallCounter.Bucket = .attributes) throws -> AXAttributes {
+    func attributes(_ keys: [String]) throws -> AXAttributes {
         var values: CFArray?
-        AxCallCounter.count(bucket)
         try throwIfNotSuccess(AXUIElementCopyMultipleAttributeValues(self, keys as CFArray, [], &values))
         let array = values as? [CFTypeRef] ?? []
         var result = AXAttributes()
@@ -208,8 +220,8 @@ extension AXUIElement {
     static let bruteForceBudgetMs: Double = 250
 
     /// Build an element per AXUIElementID for `pid` from a remote token (`_AXUIElementCreateWithRemoteToken` —
-    /// the only way to reach windows absent from every CGS list: other-Space windows and inactive OS tabs) and
-    /// hand it to `inspect`, until `inspect` returns true (it found what it wanted) or the budget elapses.
+    /// the only way to reach elements the app omits from `kAXWindows`, including other-Space windows and
+    /// inactive OS tabs) and hand it to `inspect`, until `inspect` returns true or the budget elapses.
     /// IPC per id — off the main thread only. The token's id field is the only part rewritten per iteration.
     ///
     /// Returns the id the sweep stopped at, so a caller that can be RETRIED resumes instead of re-walking the
@@ -222,14 +234,26 @@ extension AXUIElement {
     private static func bruteForceElements(_ pid: pid_t, from startId: AXUIElementID = 0,
                                            _ inspect: (AXUIElement) -> Bool) -> AXUIElementID {
         // 20 bytes: pid (4) + 0 (4) + magic 0x636f636f "coco" (4) + AXUIElementID (8); byte order matters.
-        var remoteToken = Data(count: 20)
-        remoteToken.replaceSubrange(0..<4, with: withUnsafeBytes(of: pid) { Data($0) })
-        remoteToken.replaceSubrange(4..<8, with: withUnsafeBytes(of: Int32(0)) { Data($0) })
-        remoteToken.replaceSubrange(8..<12, with: withUnsafeBytes(of: Int32(0x636f636f)) { Data($0) })
+        // ONE mutable CFData for the whole sweep, with only the id field rewritten in place. Building a fresh
+        // `Data` per field and bridging it to `CFData` per candidate allocated twice per iteration, and this
+        // loop runs thousands of iterations inside its 250ms budget: on a 51s Instruments trace it was 7.5% of
+        // the process's entire malloc/free traffic, second only to the state snapshot.
+        // Safe because the element does NOT alias the token: measured on TextEdit (two AXWindow roots captured
+        // from one reused buffer, then 30k further mutations parked on another id) both kept their own wid and
+        // role, so `_AXUIElementCreateWithRemoteToken` parses the bytes rather than retaining them.
+        guard let remoteToken = CFDataCreateMutable(kCFAllocatorDefault, 20) else { return startId }
+        CFDataSetLength(remoteToken, 20)
+        guard let bytes = CFDataGetMutableBytePtr(remoteToken) else { return startId }
+        memset(bytes, 0, 20)
+        var pidField = pid
+        memcpy(bytes, &pidField, 4)
+        var magic = Int32(0x636f636f)
+        memcpy(bytes + 8, &magic, 4)
         let timer = LightweightTimer()
         for axUiElementId: AXUIElementID in startId..<AXUIElementID.max {
-            remoteToken.replaceSubrange(12..<20, with: withUnsafeBytes(of: axUiElementId) { Data($0) })
-            if let candidate = _AXUIElementCreateWithRemoteToken(remoteToken as CFData)?.takeRetainedValue(),
+            var idField = axUiElementId
+            memcpy(bytes + 12, &idField, 8)
+            if let candidate = _AXUIElementCreateWithRemoteToken(remoteToken)?.takeRetainedValue(),
                inspect(candidate) {
                 return axUiElementId + 1
             }
@@ -238,28 +262,34 @@ extension AXUIElement {
         return AXUIElementID.max
     }
 
-    /// Resolve the AX element for ONE other-Space wid (there is no wid→element API). Returns the INSTANT a
-    /// candidate is the target's WINDOW element — matching by wid (rather than collecting every window and
-    /// reading a subrole per id) early-exits near the target's index, reaching far higher ids within the
-    /// budget. Semantics are judged downstream by admission; here we only locate — but locating must
-    /// check the ROLE: `_AXUIElementGetWindow` on ANY descendant returns the CONTAINING window's id, so every
-    /// button/toolbar of the target also matches its wid, and a tabbed window's "tab bar" element routinely
-    /// gets a LOWER AXUIElementID than the window element itself. Returning the first wid match handed the
-    /// admission that tab bar (role AXTabGroup, subrole nil), which it rightly rejected — so the launch
-    /// scan consistently missed every TABBED window until the first show's rescan got luckier (rec17). The
-    /// role read costs IPC only on the target's own descendants: other elements fail the cheap wid guard.
-    static func windowByBruteForce(_ pid: pid_t, _ wid: CGWindowID) -> AXUIElement? {
-        var found: AXUIElement?
+    /// Resolve every requested other-Space wid in ONE AXUIElementID traversal. The inventory knows all of a
+    /// process's missing wids at once; scanning once per wid repeated the same id prefix and spent a separate
+    /// 250ms budget on every non-window surface. This shares one budget and stops when every requested root is
+    /// found. It records no negative range: a later inventory starts a fresh traversal from id 0.
+    ///
+    /// `_AXUIElementGetWindow` on a descendant returns its CONTAINING window's wid too, so a wid match is not
+    /// enough. Read the role only for descendants of a requested wid and keep scanning until the `AXWindow`
+    /// root. This is the same #5849 invariant as the single-wid route below.
+    static func windowsByBruteForce(_ pid: pid_t, _ wids: Set<CGWindowID>) -> [CGWindowID: AXUIElement] {
+        guard !wids.isEmpty else { return [:] }
+        var remaining = wids
+        var found = [CGWindowID: AXUIElement]()
+        found.reserveCapacity(wids.count)
         bruteForceElements(pid) { candidate in
-            // Cheap wid gate first, so the role read costs IPC only on the target's own descendants; the
-            // root-vs-descendant verdict is the `BruteForceWindowMatch` kernel (#5849).
-            guard (try? candidate.cgWindowId(bucket: .bruteForce)) == wid else { return false }
-            let role = (try? candidate.attributes([kAXRoleAttribute], bucket: .bruteForce))?.role
+            guard let wid = try? candidate.cgWindowId(), remaining.contains(wid) else { return false }
+            let role = (try? candidate.attributes([kAXRoleAttribute]))?.role
             guard BruteForceWindowMatch.isTargetWindowRoot(candidateWid: wid, candidateRole: role, targetWid: wid) else { return false }
-            found = candidate
-            return true
+            found[wid] = candidate
+            remaining.remove(wid)
+            return remaining.isEmpty
         }
         return found
+    }
+
+    /// The event-driven and stale-element repair paths ask for one wid. Keep their interface and semantics on
+    /// the same multi-target implementation used by the inventory.
+    static func windowByBruteForce(_ pid: pid_t, _ wid: CGWindowID) -> AXUIElement? {
+        windowsByBruteForce(pid, [wid])[wid]
     }
 
     /// Find untracked standard windows whose title is one of `titles` — the only way to reach an INACTIVE OS
@@ -276,8 +306,8 @@ extension AXUIElement {
         var seen = Set<CGWindowID>()
         var result = [(CGWindowID, AXUIElement, String)]()
         let nextId = bruteForceElements(pid, from: startId) { candidate in
-            guard let wid = try? candidate.cgWindowId(bucket: .bruteForce), wid != 0, !excluding.contains(wid), !seen.contains(wid),
-                  let a = try? candidate.attributes([kAXSubroleAttribute, kAXTitleAttribute], bucket: .bruteForce),
+            guard let wid = try? candidate.cgWindowId(), wid != 0, !excluding.contains(wid), !seen.contains(wid),
+                  let a = try? candidate.attributes([kAXSubroleAttribute, kAXTitleAttribute]),
                   a.subrole == kAXStandardWindowSubrole, let title = a.title, titles.contains(title) else { return false }
             seen.insert(wid)
             result.append((wid, candidate, title))
@@ -331,10 +361,10 @@ extension AXUIElement {
     static func tabGroupInfo(_ children: [AXUIElement]?) -> (titles: [String], token: TabGroupToken?)? {
         guard let children else { return nil }
         for child in children {
-            let a = try? child.attributes([kAXRoleAttribute, kAXChildrenAttribute], bucket: .tabProbe)
+            let a = try? child.attributes([kAXRoleAttribute, kAXChildrenAttribute])
             guard a?.role == "AXTabGroup", let tabChildren = a?.children else { continue }
             let titles = tabChildren.compactMap { tab -> String? in
-                let t = try? tab.attributes([kAXSubroleAttribute, kAXTitleAttribute], bucket: .tabProbe)
+                let t = try? tab.attributes([kAXSubroleAttribute, kAXTitleAttribute])
                 guard t?.subrole == "AXTabButton" else { return nil }
                 return t?.title ?? ""
             }
@@ -359,63 +389,6 @@ enum AxError: Error {
     /// for this call: retrying re-asks a question that cannot be answered, and marking the app unresponsive
     /// for it quarantines a process that is answering fine.
     case noAnswer
-}
-
-/// **Counts outgoing AX round trips, split by why they were made.** Every AX call is Mach IPC into another
-/// process, so the count is the honest unit of cost — one blocked call ties a bounded worker for the whole
-/// 1s messaging timeout. `Applications.manuallyRefreshAllWindows` logs and resets a snapshot per switcher
-/// show, which is the number to watch when changing how often anything is read.
-///
-/// `bruteForce` is separated because a single sweep issues thousands of calls against elements that do not
-/// exist, which would otherwise swamp the number the other buckets exist to expose.
-enum AxCallCounter {
-    enum Bucket: Int, CaseIterable {
-        /// `AXUIElementCopyMultipleAttributeValues` — the ordinary per-window read
-        case attributes
-        /// the `AXTabGroup` hunt: one call per direct child of a window, plus one per tab button
-        case tabProbe
-        /// `_AXUIElementGetWindow`
-        case widLookup
-        /// the `kAXRole` close-probe (`Applications.removeIfClosedAfterOrderOut`)
-        case liveness
-        /// the remote-token sweeps; mostly calls against ids that hold no element
-        case bruteForce
-
-        var name: String {
-            switch self {
-                case .attributes: return "attrs"
-                case .tabProbe: return "tabProbe"
-                case .widLookup: return "wid"
-                case .liveness: return "liveness"
-                case .bruteForce: return "bruteForce"
-            }
-        }
-    }
-
-    private static var counts = [Int32](repeating: 0, count: Bucket.allCases.count)
-    private static let lock: UnsafeMutablePointer<os_unfair_lock> = {
-        let p = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
-        p.initialize(to: os_unfair_lock())
-        return p
-    }()
-
-    @inline(__always)
-    static func count(_ bucket: Bucket) {
-        os_unfair_lock_lock(lock)
-        counts[bucket.rawValue] &+= 1
-        os_unfair_lock_unlock(lock)
-    }
-
-    /// The counts since the previous call, zeroed. One line per switcher show.
-    static func drain() -> String {
-        os_unfair_lock_lock(lock)
-        let snapshot = counts
-        counts = [Int32](repeating: 0, count: Bucket.allCases.count)
-        os_unfair_lock_unlock(lock)
-        let total = snapshot.reduce(0, &+)
-        let parts = Bucket.allCases.map { "\($0.name)=\(snapshot[$0.rawValue])" }
-        return "axCalls total=\(total) \(parts.joined(separator: " "))"
-    }
 }
 
 struct AXAttributes {

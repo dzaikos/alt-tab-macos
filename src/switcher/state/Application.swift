@@ -21,6 +21,13 @@ class Application: NSObject {
     /// low-res source apart from one caused by an undersized `maxPossibleAppIconSize`.
     var iconSourcePixels: Int?
     var dockLabel: String?
+    /// Mirrors of the two `NSRunningApplication` properties this class reads repeatedly. Reading either one
+    /// off `runningApplication` triggers a full LaunchServices dynamic-property refresh, and
+    /// `canShowWindowlessPlaceholder` reads three of them per call. Both are KVO-compliant, so the observers
+    /// below keep these exact instead of re-fetching. Seeded before `ensureAxUiElement()`, which reads
+    /// `activationPolicy` during `init`.
+    private(set) var activationPolicy: NSApplication.ActivationPolicy
+    private(set) var isTerminated: Bool
     var focusedWindow: Window? = nil
     var alreadyRequestedToQuit = false
     /// The tracking pipeline's identity for this process, so a late teardown cannot hit a replacement that
@@ -85,6 +92,8 @@ class Application: NSObject {
             bundleIdentifier: runningApplication.bundleIdentifier,
             localizedName: runningApplication.localizedName,
             isHidden: runningApplication.isHidden)
+        activationPolicy = runningApplication.activationPolicy
+        isTerminated = runningApplication.isTerminated
         bundleURL = runningApplication.bundleURL
         executableURL = runningApplication.executableURL
         debugId = "(pid:\(state.pid) \(state.bundleIdentifier ?? bundleURL?.absoluteString ?? executableURL?.absoluteString ?? state.localizedName))"
@@ -102,11 +111,15 @@ class Application: NSObject {
         AxObserverRegistry.shared.processStarted(state.pid)
         ensureAxUiElement()
         kvObservers = [
-            runningApplication.observe(\.activationPolicy, options: [.new]) { [weak self] _, _ in
+            runningApplication.observe(\.activationPolicy, options: [.new]) { [weak self] app, _ in
                 guard let self else { return }
+                self.activationPolicy = app.activationPolicy
                 if self.canShowWindowlessPlaceholder() { _ = self.addWindowlessWindowIfNeeded() }
                 else { self.removeWindowlessAppWindow() }
                 self.ensureAxUiElement()
+            },
+            runningApplication.observe(\.isTerminated, options: [.new]) { [weak self] app, _ in
+                self?.isTerminated = app.isTerminated
             },
         ]
     }
@@ -132,7 +145,7 @@ class Application: NSObject {
     func ensureAxUiElement() {
         // The app-level observer registry owns semantic notifications. This element is the separate handle
         // used for discovery reads (subrole/title/tabs), the focused-window seed, and window actions.
-        if runningApplication.activationPolicy != .prohibited && axUiElement == nil {
+        if activationPolicy != .prohibited && axUiElement == nil {
             axUiElement = AXUIElementCreateApplication(self.pid)
         }
     }
@@ -141,7 +154,7 @@ class Application: NSObject {
         guard icon == nil else { return }
         BackgroundWork.screenshotsQueue.addOperation { [weak self] in
             guard let self, self.icon == nil else { return }
-            let r = Application.appIconWithoutPadding(runningApplication.icon)
+            let r = Application.appIconWithoutPadding(self.runningApplication.icon)
             DispatchQueue.main.async { [weak self] in
                 self?.icon = r?.image
                 self?.iconSourcePixels = r?.sourcePixels
@@ -166,8 +179,8 @@ class Application: NSObject {
     private func canShowWindowlessPlaceholder() -> Bool {
         let ownWindows = Windows.list.filter { $0.application.pid == state.pid }
         return WindowlessApplicationResolver.shouldCreate(
-            isRegular: runningApplication.activationPolicy == .regular,
-            isTerminated: runningApplication.isTerminated,
+            isRegular: activationPolicy == .regular,
+            isTerminated: isTerminated,
             hasExistingPlaceholder: ownWindows.contains { $0.isWindowlessApp },
             hasNonPhantomWindow: ownWindows.contains { !$0.isWindowlessApp && !$0.isPhantom })
     }

@@ -20,6 +20,28 @@ class Applications {
     /// just removed — the window came back for one summon, was flagged phantom on the next, and only then got
     /// its app's placeholder (#5849). Suppresses the SWEEP only; see `refreshWindowsViaWindowServer`.
     static var widsConfirmedClosed = Set<CGWindowID>()
+    /// Surfaces the inventory sweep could not acquire an AX element for, with the app window-set version it
+    /// failed at and how many attempts that situation has spent (`SurfaceAcquisitionPolicy`). Keyed by wid;
+    /// the pid rides along so an app quitting can drop its entries. Cleared on a successful acquisition, on
+    /// the wid being re-created, on window removal, on app quit, and whenever the WindowServer stops listing
+    /// the wid at all.
+    static var failedAcquisitions = [CGWindowID: (pid: pid_t, situation: UInt64, attempts: Int)]()
+
+    /// Pids the discovery path has already refused, and what they were refused as. Read through
+    /// `ApplicationVerdictCache.refusalStillAnswers`, which owns both rules (discovery-only, bundle id must
+    /// still match) and says why each is load-bearing. Dropped in `removeRunningApplications` alongside the
+    /// other per-pid caches.
+    static var refusedByDiscovery = [pid_t: RefusedApplication]()
+
+    static func noteAcquisitionFailed(_ wid: CGWindowID, _ pid: pid_t, _ situation: UInt64) {
+        let previous = failedAcquisitions[wid]
+        failedAcquisitions[wid] = (pid, situation, SurfaceAcquisitionPolicy.attemptsAfterFailure(
+            previousAttempts: previous?.attempts ?? 0, sameSituation: previous?.situation == situation))
+    }
+
+    static func forgetAcquisitionFailure(_ wid: CGWindowID) {
+        failedAcquisitions[wid] = nil
+    }
 
     static func initialDiscovery() {
         addInitialRunningApplications()
@@ -33,9 +55,6 @@ class Applications {
     /// The four correction passes, fired together behind the fixed throttle.
     static func manuallyRefreshAllWindows() {
         fullRescanThrottler.throttleOrProceed {
-            // the counts are those of the PREVIOUS pass plus the events since — i.e. what one switcher show
-            // costs in AX round trips, which is the number to watch when changing how often anything is read
-            Logger.debug { "manuallyRefreshAllWindows \(AxCallCounter.drain())" }
             syncSpacesState()
             refreshWindowsViaWindowServer()
             reviewExistingWindows()
@@ -159,6 +178,7 @@ class Applications {
                 // Same reconcile for the opt-in dedup set: this enumeration is the only place that sees which
                 // wids still exist, and destroy events don't erase reliably.
                 WindowServerEvents.pruneSubscriptions(allWids)
+                var acquisitionRequests = [(raw: WsRawWindow, app: Application, situation: UInt64)]()
                 for raw in rawWindows {
                     let physical = PhysicalSurface(raw)
                     guard WindowAdmissionResolver.shouldAcquireSemantics(physical) ||
@@ -170,12 +190,20 @@ class Applications {
                     // genuinely-new windows.
                     guard Windows.byWindowId[raw.wid]?.axUiElement == nil else { continue }
                     guard !widsConfirmedClosed.contains(raw.wid) else { continue }
-                    AXCallScheduler.shared.schedule(key: "wid-\(raw.wid)-acquire", context: app.debugId, pid: raw.pid, scan: true) {
-                        guard let element = WindowElementAcquisition.element(for: raw.wid, pid: raw.pid,
-                            route: .otherSpaceViaBruteForce) else { return }
-                        addDiscoveredWindow(element, raw, app)
-                    }
+                    // A surface that has failed to acquire three times at this app's current window set is
+                    // not asked a fourth time. Eligible surfaces are collected here and grouped by pid below,
+                    // so one app pays at most one 250ms traversal for the whole inventory pass rather than one
+                    // per wid. Event-driven discovery is untouched.
+                    let situation = Windows.appWindowSetVersion[raw.pid] ?? 0
+                    let previousAttempt = failedAcquisitions[raw.wid]
+                    guard SurfaceAcquisitionPolicy.shouldAttempt(recordedSituation: previousAttempt?.situation,
+                        attempts: previousAttempt?.attempts ?? 0, situation: situation) else { continue }
+                    acquisitionRequests.append((raw, app, situation))
                 }
+                scheduleSurfaceAcquisitions(acquisitionRequests)
+                // Bound the failure table by the same enumeration that gates everything else here: a wid the
+                // WindowServer no longer lists can never be swept again, so its record is dead weight.
+                failedAcquisitions = failedAcquisitions.filter { allWids.contains($0.key) }
                 // regular apps with no windows show as an icon placeholder. It's dropped when a real window
                 // arrives (Window.init) or when an existing window un-phantoms (Window.updateSpaces), so a
                 // window that recovers its Space after a fullscreen transition clears the stale placeholder
@@ -184,6 +212,36 @@ class Applications {
                 // phantom detection reuses this same all-Space fetch; the per-window verdicts + latches are
                 // the reducer's `.cgsWindowListsRead` branch
                 TrackedWindowStateBridge.dispatch(.cgsWindowListsRead(visible: visibleWids, all: allWids))
+            }
+        }
+    }
+
+    /// One inventory request per PROCESS, because every requested wid is tested by the same AXUIElementID
+    /// sequence. The scheduler key also coalesces a newer inventory arriving while this process's traversal is
+    /// in flight. Each unresolved wid keeps its own situation-keyed retry record; batching changes cost, not
+    /// eligibility or the meaning of a failure.
+    private static func scheduleSurfaceAcquisitions(_ requests: [(raw: WsRawWindow, app: Application, situation: UInt64)]) {
+        for (pid, batch) in Dictionary(grouping: requests, by: { $0.raw.pid }) {
+            guard let app = batch.first?.app else { continue }
+            let rows = batch.map { $0.raw }
+            AXCallScheduler.shared.schedule(key: "pid-\(pid)-surface-acquire", context: app.debugId, pid: pid, scan: true) {
+                let elements = WindowElementAcquisition.elements(for: rows, pid: pid,
+                    route: .otherSpaceViaBruteForce)
+                DispatchQueue.main.async {
+                    for request in batch {
+                        guard elements[request.raw.wid] != nil else {
+                            // Recorded against the situation the batch was ISSUED at, not the one current
+                            // when its shared 250ms traversal finished.
+                            noteAcquisitionFailed(request.raw.wid, pid, request.situation)
+                            continue
+                        }
+                        failedAcquisitions[request.raw.wid] = nil
+                    }
+                }
+                for request in batch {
+                    guard let element = elements[request.raw.wid] else { continue }
+                    addDiscoveredWindow(element, request.raw, request.app)
+                }
             }
         }
     }
@@ -677,8 +735,14 @@ class Applications {
             guard bundleIdentifier != "com.apple.universalcontrol" else { return }
             // classify off-main (process & sysctl IPC), then create on main if it's a real app (#5721).
             // findOrCreate stays synchronous for the rarer AX-event new-pid path (it re-checks the list).
+            // `thenMain`, so the verdict is recorded on the thread that owns the table.
             ProcessCallScheduler.isActualApplication(processIdentifier, bundleIdentifier) { isActual in
-                if isActual { createActualApp(runningApp) }
+                guard isActual else {
+                    refusedByDiscovery[processIdentifier] = RefusedApplication(bundleId: bundleIdentifier)
+                    return
+                }
+                refusedByDiscovery[processIdentifier] = nil
+                createActualApp(runningApp)
             }
         }
     }
@@ -714,6 +778,9 @@ class Applications {
             lastInactiveTabScan[pid] = nil
             inactiveTabScanCursor[pid] = nil
             Windows.forgetAppWindowSetVersion(pid)
+            refusedByDiscovery[pid] = nil
+            ApplicationDiscriminator.forgetProcess(pid)
+            failedAcquisitions = failedAcquisitions.filter { $0.value.pid != pid }
         }
         App.refreshOpenUiAfterExternalEvent([])
     }
@@ -747,7 +814,7 @@ class Applications {
         Windows.list.enumerated().forEach { (i, window) in
             let view = TilesView.recycledViews[i]
             if let app = findOrCreate(window.application.pid, false) {
-                if app.runningApplication.activationPolicy == .regular,
+                if app.activationPolicy == .regular,
                    let matchingItem = (items.first { $0.0 == app.bundleURL }),
                    let label = matchingItem.1 {
                     app.dockLabel = label
@@ -764,13 +831,25 @@ class Applications {
     static func findOrCreate(_ pid: pid_t, _ needToVerifyFrontmostPid: Bool,
                              evidence: ApplicationAdmissionEvidence = .discovery) -> Application? {
         if let app = (list.first { $0.pid == pid }) { return app }
+        // A WindowServer row can name pid 0 (no owner). Asking LaunchServices about it fails 1,078 times a
+        // pass and can never do anything else.
+        guard pid > 0 else { return nil }
         guard let runningApp = NSRunningApplication(processIdentifier: pid) else {
             Logger.debug { "NSRunningApplication init failed for pid:\(pid)" }
             return nil
         }
+        // Asked with the bundle id in hand, so a reused pid misses and is classified properly. The lookup
+        // above is a LaunchServices read AppKit already caches; what the refusal saves is the process and
+        // sysctl IPC below.
+        guard !ApplicationVerdictCache.refusalStillAnswers(refusedByDiscovery[pid],
+                  bundleId: runningApp.bundleIdentifier, evidence: evidence) else { return nil }
         guard ApplicationDiscriminator.isActualApplication(pid, runningApp.bundleIdentifier, evidence: evidence) else {
+            if evidence == .discovery {
+                refusedByDiscovery[pid] = RefusedApplication(bundleId: runningApp.bundleIdentifier)
+            }
             return nil
         }
+        refusedByDiscovery[pid] = nil
         let app = Application(runningApp)
         list.append(app)
         return app

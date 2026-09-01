@@ -410,7 +410,8 @@ class Window {
             WindowServerEvents.noteAltTabInitiatedFocus(cgWindowId!, application.pid)
             Windows.promoteAttentionEvidence(cgWindowId!)
             let targetMaybeCrossSpace = !self.spaceIds.isEmpty && !self.spaceIds.contains(originSpaceId)
-            let originFrontPid = targetMaybeCrossSpace ? NSWorkspace.shared.frontmostApplication?.processIdentifier : nil
+            let originFrontPid = targetMaybeCrossSpace
+                ? NSWorkspace.shared.frontmostApplication?.processIdentifier : nil
             BackgroundWork.accessibilityCommandsQueue.addOperation { [weak self] in
                 guard let self else { return }
                 if self.isMinimized, let element = self.axUiElement {

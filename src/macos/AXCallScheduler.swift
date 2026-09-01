@@ -25,9 +25,9 @@ class AXCallScheduler {
 
     /// How many calls to ONE process may be in flight at once, across all lanes. Half the narrowest lane
     /// (6), so a single app can never take more than half of any pool and at least three workers stay
-    /// available to everyone else. Not lower: an app legitimately has bursts of its own (a 20-window app at
-    /// cold start, each acquire possibly paying the 250ms brute-force budget), and serializing those too
-    /// hard makes discovery slow for a perfectly healthy app.
+    /// available to everyone else. Not lower: event-driven reads still arrive per window, and serializing a
+    /// healthy app's legitimate focus/title/action burst too hard makes discovery visibly slow. Periodic
+    /// inventory acquisition is separately grouped into one brute-force traversal per process.
     private static let maxInFlightPerPid = 3
 
     private let lock = NSLock()

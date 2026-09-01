@@ -94,8 +94,17 @@ class TrackedWindowStateBridge {
     static func snapshot() -> TrackedWindowState {
         var state = TrackedWindowState()
         state.windows = Windows.list.map { modelWindow($0) }
+        // `isActive` is DERIVED, never read off `NSRunningApplication`. Its getter is a full LaunchServices
+        // dynamic-property refresh (mach round trip + sysctl + CFString building, allocating throughout), and
+        // this loop ran one per app on EVERY dispatch, and a title/tab refresh dispatches once per window,
+        // so a switcher show cost O(windows × apps) cross-process calls. Measured on a 51s Instruments trace:
+        // 4.9s of 7.6s total main-thread CPU and 53% of the process's entire malloc/free traffic, all of it
+        // re-deriving a fact `frontmostPid` already holds. Deriving also makes the snapshot self-consistent:
+        // it could previously carry `frontmostPid = A` together with `apps[B].isActive = true`, and different
+        // reducer rules read different halves of that.
+        let frontmostPid = Applications.frontmostPid
         for app in Applications.list {
-            state.apps[app.pid] = TrackedApp(state: app.state, isActive: app.runningApplication.isActive)
+            state.apps[app.pid] = TrackedApp(state: app.state, isActive: app.pid == frontmostPid)
         }
         state.groups = TabGroups.table
         state.held = Windows.windowsHeldVisibleForTab
@@ -108,7 +117,7 @@ class TrackedWindowStateBridge {
         for (id, index) in Spaces.idsAndIndexes where state.spaceIndexById[id] == nil {
             state.spaceIndexById[id] = index
         }
-        state.frontmostPid = Applications.frontmostPid
+        state.frontmostPid = frontmostPid
         // The time of the input about to be reduced. Stamped here so no reducer branch reads a clock itself
         // (a pure reducer can't) yet every MRU write can say WHEN it happened — see `TrackedWindowState.now`.
         state.now = ProcessInfo.processInfo.systemUptime

@@ -32,7 +32,9 @@ class Spaces {
     static func query(_ mainScreenUuid: ScreenUuid?, includeWindowMap: Bool) -> Snapshot {
         let raw = CGSCopyManagedDisplaySpaces(CGS_CONNECTION) as! [NSDictionary]
         // rare scenario: NSScreen.main is nil → no uuid → keep the previous current Space (nil here)
-        let current = mainScreenUuid.map { CGSManagedDisplayGetCurrentSpace(CGS_CONNECTION, $0) }
+        let current = mainScreenUuid.map { uuid in
+            CGSManagedDisplayGetCurrentSpace(CGS_CONNECTION, uuid)
+        }
         var map = [CGWindowID: [CGSSpaceID]]()
         if includeWindowMap {
             // one query per Space, inverted, so N per-window CGSCopySpacesForWindows calls become M per-Space calls

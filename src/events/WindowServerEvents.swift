@@ -138,6 +138,9 @@ class WindowServerEvents {
             // once the level is known.
             wsWindows.remove(w0)
             WindowSurfaceInventory.remove(w0)
+            // ...and any verdict about the OLD window behind this number, including the sweep's record of
+            // having failed to acquire it: this is a different window now and deserves its own attempts.
+            Applications.forgetAcquisitionFailure(w0)
         case .windowDestroyed:
             unsubscribe(w0)
             WindowSurfaceInventory.remove(w0)

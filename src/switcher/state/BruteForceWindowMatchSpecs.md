@@ -2,9 +2,9 @@
 
 ## Summary
 
-`BruteForceWindowMatch` is the pure decision kernel for `AXUIElement.windowByBruteForce`: given ONE
-remote AX element found during the brute-force scan for a target wid, is it the window's ROOT element,
-or one of that window's descendants that happens to resolve to the same wid?
+`BruteForceWindowMatch` is the pure decision kernel for `AXUIElement.windowsByBruteForce`: given one remote
+AX element found during the brute-force scan for requested wids, is it a window's ROOT element, or one of
+that window's descendants that happens to resolve to the same wid?
 
 The brute-force scan (`bruteForceElements`) walks remote-token AXUIElementIDs and asks each candidate
 "do you belong to wid W?" via `_AXUIElementGetWindow`. The trap: that call returns the CONTAINING
@@ -31,10 +31,10 @@ Gate on ROLE, not subrole. A real window's subrole is judged downstream by `Wind
 would drop apps with nonstandard trees. Role `AXWindow` is the narrowest gate that still lets the scan
 skip descendants and land on the root.
 
-`windowByBruteForce` is the thin impure adapter: it reads the wid first (cheap), reads the role only
-after the wid matches (so IPC for the role is paid only on the target's own descendants), then routes the
-verdict here. Because the scan returns on the first `true`, a `false` for a descendant means "keep
-scanning" — so a descendant at a lower id no longer short-circuits the real window.
+`windowsByBruteForce` is the thin impure adapter: it reads the wid first (cheap), reads the role only after
+the wid belongs to the remaining target set (so IPC for the role is paid only on requested windows'
+descendants), then routes the verdict here. A `false` for a descendant means "keep scanning"; a root removes
+that wid from the set, and the traversal stops only when every requested root is found or its budget expires.
 
 ## The second rule: WHOSE tab is it? (`isPlausibleInactiveTab`)
 
@@ -93,7 +93,11 @@ Mirrors `BruteForceWindowMatchTests.swift` 1:1.
   `[(wid W, AXOutline), (wid W, AXWindow)]`; `firstIndex(isTargetWindowRoot)` selects index 1, proving
   the earlier `AXOutline` no longer wins.
 
-### E. Whose tab is it? (`isPlausibleInactiveTab`, the 2026-08-01 cross-window adoption)
+### E. One traversal can collect several target roots
+- **testBatchCollectsEveryRequestedRootWithoutAcceptingDescendants** — two target wids have descendants and
+  roots interleaved with an unrelated window; one traversal accepts both roots and neither descendant.
+
+### F. Whose tab is it? (`isPlausibleInactiveTab`, the 2026-08-01 cross-window adoption)
 - **testAdoptsATabParkedOnTheRequester** — the ordinary case: candidate at the requester's origin → true.
 - **testRejectsATabParkedOnAnotherWindowOfTheSameApp** — the captured failure: the scan run for the window at
   y=80 found a candidate sitting exactly on the window at y=600 → false.

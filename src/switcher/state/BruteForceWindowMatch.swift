@@ -1,7 +1,7 @@
 import Cocoa
 
-/// Pure decision kernel for `AXUIElement.windowByBruteForce`: given ONE remote AX element found during the
-/// brute-force scan, is it the ROOT window element for the target wid — or merely one of that window's
+/// Pure decision kernel for `AXUIElement.windowsByBruteForce`: given one remote AX element found during the
+/// brute-force scan, is it the ROOT window element for its requested wid — or merely one of that window's
 /// descendants that happens to resolve to the same wid?
 ///
 /// `_AXUIElementGetWindow` returns the CONTAINING window's id for a window's descendants too, so every
@@ -14,8 +14,8 @@ import Cocoa
 /// The fix is a root check: the target's root window element is the one whose role is `AXWindow`. Subrole is
 /// judged downstream by `WindowAdmissionResolver` (a real window can be `AXStandardWindow` or `AXDialog`), so we
 /// gate on ROLE here, not subrole — filtering by standard subrole alone would drop apps with nonstandard
-/// trees. `windowByBruteForce` is the thin impure adapter: it keeps the cheap wid gate first (so the role
-/// read costs IPC only on the target's own descendants) and routes the final verdict through this kernel.
+/// trees. `windowsByBruteForce` is the thin impure adapter: it keeps the cheap requested-wid gate first (so
+/// the role read costs IPC only on target windows' descendants) and routes each verdict through this kernel.
 enum BruteForceWindowMatch {
     /// True iff `candidate` is the target's root window element: it owns the target wid AND its role is
     /// `AXWindow`. A descendant sharing the wid (any non-`AXWindow` role) returns false, so the scan keeps

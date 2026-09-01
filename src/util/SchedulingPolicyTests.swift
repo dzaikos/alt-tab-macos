@@ -124,4 +124,38 @@ final class SchedulingPolicyTests: XCTestCase {
         // a fresh situation restarts the budget rather than inheriting the previous one's
         XCTAssertEqual(InactiveTabScanPolicy.attemptsAfterScan(previousAttempts: 2, sameSituation: false, adopted: 0), 1)
     }
+
+    // MARK: - D. SurfaceAcquisitionPolicy
+
+    /// a surface with no failure on record is swept, as before
+    func testAFreshSurfaceIsAlwaysAttempted() {
+        XCTAssertTrue(SurfaceAcquisitionPolicy.shouldAttempt(recordedSituation: nil, attempts: 0, situation: 7))
+    }
+
+    /// a failure is not a verdict: the situation keeps its attempts, because an app still building its
+    /// accessibility tree at launch fails transiently
+    func testAFailedSurfaceIsRetriedWithinTheBudget() {
+        for spent in 0..<SurfaceAcquisitionPolicy.maxAttemptsPerSituation {
+            XCTAssertTrue(SurfaceAcquisitionPolicy.shouldAttempt(recordedSituation: 7, attempts: spent, situation: 7))
+        }
+    }
+
+    /// past the cap the sweep leaves it out of subsequent process batches
+    func testAFailedSurfaceStopsAtTheCap() {
+        XCTAssertFalse(SurfaceAcquisitionPolicy.shouldAttempt(recordedSituation: 7,
+            attempts: SurfaceAcquisitionPolicy.maxAttemptsPerSituation, situation: 7))
+    }
+
+    /// the app gaining or losing a window is what plausibly makes a previously-unreachable element
+    /// reachable, so it restarts the budget however exhausted the last situation was
+    func testANewWindowSetMakesTheSurfaceEligibleAgain() {
+        XCTAssertTrue(SurfaceAcquisitionPolicy.shouldAttempt(recordedSituation: 7, attempts: 99, situation: 8))
+    }
+
+    /// the counter is per situation, not cumulative, so a long-lived app that churns windows never
+    /// accumulates its way into a permanent refusal
+    func testAttemptsResetOnANewSituation() {
+        XCTAssertEqual(SurfaceAcquisitionPolicy.attemptsAfterFailure(previousAttempts: 2, sameSituation: true), 3)
+        XCTAssertEqual(SurfaceAcquisitionPolicy.attemptsAfterFailure(previousAttempts: 2, sameSituation: false), 1)
+    }
 }

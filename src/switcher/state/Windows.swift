@@ -743,6 +743,7 @@ class Windows {
                 Applications.screenshotThrottler.removeEntry(withKey: "capture-wid-\(wid)")
                 Applications.screenshotThrottler.removeEntry(withKey: "preview-wid-\(wid)")
                 Applications.forgetTabRead(wid)
+                Applications.forgetAcquisitionFailure(wid)
             }
             // when a tabbed window is removed, its group shrinks (or dissolves) in the registry
             if let wid = w.cgWindowId {

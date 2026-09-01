@@ -156,8 +156,7 @@ class AxObserverRegistry {
         let refcon = Self.packRefcon(pid: process.pid, observerGeneration: observerGeneration)
         AXCallScheduler.shared.schedule(key: "axobs-\(process.pid)-\(capability.telemetryName)",
                                         context: "axSemantics", pid: process.pid) {
-            let result = AXObserverAddNotification(entry.observer, entry.element,
-                capability.notificationName as CFString, refcon)
+            let result = entry.element.addNotification(entry.observer, capability.notificationName, refcon)
             if result != .success && result != .notificationAlreadyRegistered {
                 Logger.debug { "axobs pid=\(process.pid) \(capability.telemetryName) refused \(result.rawValue)" }
             }
