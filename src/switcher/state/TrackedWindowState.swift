@@ -27,11 +27,34 @@ struct TrackedWindow: Equatable {
     var spaceIds = [UInt64]()               // CGSSpaceID === UInt64
     var spaceIndexes = [Int]()              // SpaceIndex === Int
     var isOnAllSpaces = false
-    /// SYNTHETIC marker: `spaceIds` was copied from a tab sibling, not reported by CGS (see `Window.spaceIsBorrowed`)
+    /// SYNTHETIC marker: `spaceIds` was COPIED from a tab sibling (the backfill onto background tabs; the
+    /// borrow onto a representative that just backgrounded) rather than reported by CGS/WindowServer. A
+    /// borrowed Space is OUR annotation, not evidence: rules that read "holds a Space" as "genuinely
+    /// on-screen" must see this flag, or the annotation defeats them — three recordings each found one such
+    /// rule (rec14: the hold; rec20: a brand-new active's claim rejecting its group's ex-representative,
+    /// orphaning it as a permanent stray tile). Cleared whenever genuine Space evidence arrives (a CGS map
+    /// hit, a 1325/1326 delta).
+    ///
+    /// Leaving the group does NOT clear it, and does not strip the Space either. It used to: the borrow was
+    /// "dropped with the membership that justified it", which wrote a fact nobody had told us — "CGS places
+    /// this window nowhere" — and that is precisely the strong phantom signal, so an ungrouped window was
+    /// HIDDEN on our own guess. Live case: "Move Tab to New Window", the group re-forms around the
+    /// other two members, and the window the user had just torn out vanished from the switcher for 515ms,
+    /// until `spacesSynced` re-read the Space CGS had held for it the whole time. rec20's stray is answered
+    /// by this flag alone — every claim rule reads it, with the Space still set
+    /// (`testExRepresentativeWithABorrowedSpaceIsClaimable`) — and an ex-member that is genuinely gone is
+    /// not left standing: a completed empty Space answer turns it phantom and hands it to the dead-window
+    /// sweep. A failed query stays unknown and preserves this value until another provider answers.
     var spaceIsBorrowed = false
     var isFullscreen = false
-    /// SYNTHETIC marker: `isFullscreen` was mirrored from the active tab sibling, not reported by the
-    /// WindowServer (see `Window.isFullscreenMirrored`)
+    /// SYNTHETIC marker: `isFullscreen` was MIRRORED from the active tab sibling, not reported by the
+    /// WindowServer (a background tab gets no WS geometry event, so its own flag would go stale — the mirror
+    /// keeps the fullscreen/minimized FILTERS correct for the whole group). Like `spaceIsBorrowed`, it marks
+    /// a synthetic write: tab-grouping rules must see only GENUINE (OS-reported) fullscreen — a frozen
+    /// 920×436 background tab wearing the mirrored flag poisoned the whole windowed size-cluster (geometry
+    /// stopped splitting it by frame and folded it; the title claim waived its exact-position test), merging
+    /// 25 windows across three frames and hiding a real window (rec21). Cleared whenever the WindowServer
+    /// reports the flag genuinely.
     var isFullscreenMirrored = false
     var isMinimized = false
     var isMainWindow = false
@@ -105,6 +128,18 @@ struct TrackedWindow: Equatable {
     /// in the shell — `ReducerEffect.copyThumbnail`)
     var hasThumbnail = false
     var lifecycle = WindowLifecycleState.alive
+
+    /// The STORED kernel record: `isPhantom` carries the CGS latch and `isTabbed` the dead stored value,
+    /// because both live facts are derived by whoever holds the tab registry — `TrackedWindowState` for the
+    /// reducer, the live `Window` for the shell. Feed this to `syncVerdict`; the derived record is
+    /// `TrackedWindowState.windowState(_:)` on one side and `Window.state` on the other.
+    var storedWindowState: WindowState {
+        WindowState(id: id, isPhantom: cgsPhantomLatch, isWindowlessApp: isWindowlessApp,
+            isFullscreen: isFullscreen, isMinimized: isMinimized, isTabbed: false,
+            isOnAllSpaces: isOnAllSpaces, spaceIds: spaceIds, spaceIndexes: spaceIndexes,
+            lastFocusOrder: lastFocusOrder, creationOrder: creationOrder, title: title,
+            isMainWindow: isMainWindow)
+    }
 }
 
 enum WindowLifecycleState: Equatable {
@@ -481,7 +516,7 @@ struct TrackedWindowState: Equatable {
                 !(window(m)?.spaceIds.isEmpty ?? true) || held.contains(m)
             }) { return false }
         }
-        return PhantomWindowDetector.syncVerdict(storedWindowState(w), appState(w.pid),
+        return PhantomWindowDetector.syncVerdict(w.storedWindowState, appState(w.pid),
             isOrderedIn: w.isOrderedIn, alpha: w.alpha)
     }
 
@@ -515,19 +550,9 @@ struct TrackedWindowState: Equatable {
             tabGroupToken: table.tokenByWid[wid])
     }
 
-    /// The STORED record (the live `Window.storedState`): `isPhantom` carries the CGS latch, `isTabbed` the
-    /// dead stored value (never written — the live one is derived). Feed this to `syncVerdict`.
-    func storedWindowState(_ w: TrackedWindow) -> WindowState {
-        WindowState(id: w.id, isPhantom: w.cgsPhantomLatch, isWindowlessApp: w.isWindowlessApp,
-            isFullscreen: w.isFullscreen, isMinimized: w.isMinimized, isTabbed: false,
-            isOnAllSpaces: w.isOnAllSpaces, spaceIds: w.spaceIds, spaceIndexes: w.spaceIndexes,
-            lastFocusOrder: w.lastFocusOrder, creationOrder: w.creationOrder, title: w.title,
-            isMainWindow: w.isMainWindow)
-    }
-
     /// The DERIVED record (the live `Window.state`): both derived facts patched in.
     func windowState(_ w: TrackedWindow) -> WindowState {
-        var s = storedWindowState(w)
+        var s = w.storedWindowState
         s.isTabbed = isTabbed(w)
         s.isPhantom = isPhantom(w)
         return s

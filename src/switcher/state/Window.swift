@@ -6,25 +6,38 @@ import Cocoa
 class Window {
     private static var globalCreationCounter = Int.zero
 
-    /// Backing record for the fields this window OWNS. Two of its fields are NOT owned here and must never
-    /// be read off it directly: `isTabbed` is dead storage (the live value is derived from the `TabGroups`
-    /// registry — see the computed property below), and `isPhantom` holds only the latched CGS verdict
-    /// (written by `applyCgsPhantomVerdict`; the user-facing value is the derived `isPhantom` below).
-    /// Kernels receive `state`, which patches both derived values in.
-    private var storedState: WindowState
+    /// **The single backing record for every fact the reducer owns** (`TrackedWindow`), held as ONE value so
+    /// the bridge moves it whole: `TrackedWindowStateBridge.modelWindow` reads it and `adopt(_:)` takes the
+    /// reduced one back. A field added to `TrackedWindow` therefore crosses in both directions by
+    /// construction — the field-by-field copy this replaces could not promise that, and eight fields once
+    /// shipped inert because one of the two lists was missing them.
+    ///
+    /// Two of its fields must never be read off it directly: `cgsPhantomLatch` holds only the latched CGS
+    /// verdict (the user-facing value is the derived `isPhantom` below), and `hasThumbnail` mirrors pixels
+    /// this class owns. Kernels receive `state`, which patches the derived values in.
+    var tracked: TrackedWindow
     /// Canonical data record this window exposes to the switcher's logic kernels (see `WindowState`), with
-    /// the two derived facts (`isTabbed`, `isPhantom`) patched in. The subscript below forwards every other
-    /// `WindowState` field by name — `window.title` / `window.isFullscreen` / `window.spaceIds` / etc. —
-    /// so call sites stay unchanged without per-property boilerplate on this class.
+    /// the derived facts (`isTabbed`, `isPhantom`, the tab hold) patched in. The subscript below forwards
+    /// every `TrackedWindow` field by name — `window.title` / `window.isFullscreen` / `window.spaceIds` /
+    /// etc. — so call sites stay unchanged without per-property boilerplate on this class.
     var state: WindowState {
-        var s = storedState
+        var s = tracked.storedWindowState
         s.isTabbed = isTabbed
         s.isPhantom = isPhantom
         s.isHeldVisibleForTab = cgWindowId.map { Windows.windowsHeldVisibleForTab.contains($0) } ?? false
+        s.axStatus = axStatus
         return s
     }
-    var cgWindowId: CGWindowID?
-    var thumbnail: CALayerContents?
+    /// `TrackedWindow.wid`, under the name the shell has always called it.
+    var cgWindowId: CGWindowID? {
+        get { tracked.wid }
+        set { tracked.wid = newValue }
+    }
+    /// Shell-owned, so deliberately NOT in `tracked`: it records how this destination was acquired (AX vs
+    /// attention), which no reducer rule or kernel decides on. Patched into `state` for the kernels.
+    var axStatus = AxSemanticStatus.axVerified
+    /// The pixels are shell-owned; `tracked.hasThumbnail` is the reducer's view of them, so it mirrors this.
+    var thumbnail: CALayerContents? { didSet { tracked.hasThumbnail = thumbnail != nil } }
     var icon: CGImage? { get { application.icon } }
     var shouldShowTheUser = true
     /// DERIVED from the `TabGroups` registry (the single owner of group membership): the ordered members of
@@ -36,62 +49,8 @@ class Window {
     /// the registry exists to kill — a focused window flagged tabbed and hidden with nothing to correct it,
     /// members disagreeing on who is visible. Get-only, so no call site can write it back.
     var isTabbed: Bool { cgWindowId.map { TabGroups.isTabbed($0) } ?? false }
-    /// True when `spaceIds` was COPIED from a tab sibling (the backfill onto background tabs; the borrow onto
-    /// a representative that just backgrounded) rather than reported by CGS/WindowServer. A borrowed Space is
-    /// OUR annotation, not evidence: rules that read "holds a Space" as "genuinely on-screen" must see this
-    /// flag, or the annotation defeats them — three recordings each found one such rule (rec14: the hold;
-    /// rec20: a brand-new active's claim rejecting its group's ex-representative, orphaning it as a permanent
-    /// stray tile). Cleared whenever genuine Space evidence arrives (a CGS map hit, a 1325/1326 delta).
-    ///
-    /// Leaving the group does NOT clear it, and does not strip the Space either. It used to: the borrow was
-    /// "dropped with the membership that justified it", which wrote a fact nobody had told us — "CGS places
-    /// this window nowhere" — and that is precisely the strong phantom signal, so an ungrouped window was
-    /// HIDDEN on our own guess. Live case: "Move Tab to New Window", the group re-forms around the
-    /// other two members, and the window the user had just torn out vanished from the switcher for 515ms,
-    /// until `spacesSynced` re-read the Space CGS had held for it the whole time. rec20's stray is answered
-    /// by this flag alone — every claim rule reads it, with the Space still set
-    /// (`testExRepresentativeWithABorrowedSpaceIsClaimable`) — and an ex-member that is genuinely gone is
-    /// not left standing: a completed empty Space answer turns it phantom and hands it to the dead-window
-    /// sweep. A failed query stays unknown and preserves this value until another provider answers.
-    var spaceIsBorrowed = false
-    /// The Space this window most recently LEFT (a 1326 names it), nil once it joins one again — the history
-    /// tab-grouping needs to tell a just-backgrounded tab from a brand-new one. Owned by the reducer.
-    var lastLeftSpaceId: UInt64?
-    /// The handover edge: the wid that took this window's place on the Space it just left, and the wid this
-    /// one replaced when it joined. Owned by the reducer; see `TrackedWindow.replacedByWid` for why a Space
-    /// cannot answer what a wid can.
-    var replacedByWid: CGWindowID?
-    var replacedWid: CGWindowID?
-    /// The WindowServer's ordered-in bit: this window is on screen right now. Owned by the reducer; see
-    /// `TrackedWindow.isOrderedIn` for the measurement that makes it the tab-vs-window discriminator.
-    var isOrderedIn = false
-    /// The WindowServer's compositing alpha, maintained by the batched WS query. `0` is the alpha-0 phantom
-    /// family (Outlook reminders) stated exactly; see `PhantomWindowDetector`.
-    var alpha: Float = 1
-    /// Tab-button count from this window's last AXTabGroup read (0 = none / not tabbed). Owned by the
-    /// reducer; see `TabWindow.tabCount` for why the COUNT is trusted where the tab TITLES are not.
-    var tabCount = 0
-    var tabGroupObservation = TabGroupObservation.unknown
-    var spaceMembershipObservation = SpaceMembershipObservation.unavailable
-    var lifecycle = WindowLifecycleState.alive
-    /// True when `isFullscreen` was MIRRORED from the active tab sibling (a background tab gets no WS
-    /// geometry event, so its own flag would go stale — the mirror keeps the fullscreen/minimized FILTERS
-    /// correct for the whole group). Like `spaceIsBorrowed`, it marks a synthetic write: tab-grouping rules
-    /// must see only GENUINE (OS-reported) fullscreen — a frozen 920×436 background tab wearing the mirrored
-    /// flag poisoned the whole windowed size-cluster (geometry stopped splitting it by frame and folded it;
-    /// the title claim waived its exact-position test), merging 25 windows across three frames and hiding a
-    /// real window (rec21). Cleared whenever the WindowServer reports the flag genuinely.
-    var isFullscreenMirrored = false
-    /// When the OS last told us this window came forward — the MRU truth, from which `lastFocusOrder` is
-    /// derived. Written only by the reducer (`TrackedWindowState.noteFocus`, applied through the bridge); it
-    /// lives here so it survives between dispatches, since the state is re-snapshotted from the live model
-    /// each time. Orchestration bookkeeping, deliberately NOT in `WindowState`: kernels rank windows, they
-    /// don't time them. See `TrackedWindow.focusedAt`.
-    var focusedAt: TimeInterval = 0
     var isHidden: Bool { get { application.isHidden } }
     var dockLabel: String? { get { application.dockLabel } }
-    var position: CGPoint?
-    var size: CGSize?
     var screenId: ScreenUuid?
     var axUiElement: AXUIElement?
     /// Behavioral evidence is independent from AX availability. Once exact attention names this destination,
@@ -106,29 +65,34 @@ class Window {
     var swTitleResults: [SWResult] = []
     var swBestSimilarity = 0.0
 
-    /// Forwards every `WindowState` field by name — `window.title` resolves to the stored record,
+    /// Forwards every `TrackedWindow` field by name — `window.title` resolves to the backing record,
     /// `window.isFullscreen = true` writes through. Replaces a stack of one-per-field computed
-    /// properties. The explicit `isTabbed` / `isPhantom` / `tabbedSiblingWids` members above shadow this
-    /// for the derived facts, so those can't be read stale or written at all.
-    subscript<T>(dynamicMember keyPath: WritableKeyPath<WindowState, T>) -> T {
-        get { storedState[keyPath: keyPath] }
-        set { storedState[keyPath: keyPath] = newValue }
+    /// properties. The explicit `isTabbed` / `isPhantom` / `cgsPhantomLatch` / `tabbedSiblingWids` members
+    /// above shadow this for the derived facts, so those can't be read stale or written at all.
+    subscript<T>(dynamicMember keyPath: WritableKeyPath<TrackedWindow, T>) -> T {
+        get { tracked[keyPath: keyPath] }
+        set { tracked[keyPath: keyPath] = newValue }
+    }
+
+    /// Take the reduced record whole — the write half of the bridge (`TrackedWindowStateBridge.apply`).
+    /// `hasThumbnail` is the one field re-derived instead of adopted: the pixels are shell-owned, and the
+    /// reducer setting it true states an INTENT that the `copyThumbnail` effect fulfils after this runs, and
+    /// may not (the source window can be gone by then).
+    func adopt(_ record: TrackedWindow) {
+        tracked = record
+        tracked.hasThumbnail = thumbnail != nil
     }
 
     /// `axUiElement` is optional for an exact-attention destination whose app has not answered yet.
     init(_ axUiElement: AXUIElement?, _ application: Application, _ wid: CGWindowID, _ title: String?, _ isFullscreen: Bool?, _ isMinimized: Bool?, _ position: CGPoint?, _ size: CGSize?, _ axStatus: AxSemanticStatus = .axVerified, _ admissionEvidence: WindowAdmissionEvidence = .discovery) {
-        storedState = WindowState(
-            id: "wid-\(wid)", isPhantom: false, isWindowlessApp: false,
-            isFullscreen: false, isMinimized: false, isTabbed: false,
-            isOnAllSpaces: false, spaceIds: [CGSSpaceID.max], spaceIndexes: [SpaceIndex.max],
-            lastFocusOrder: .zero, creationOrder: .zero, title: "")
+        tracked = TrackedWindow(id: "wid-\(wid)", wid: wid, pid: application.pid,
+            spaceIds: [CGSSpaceID.max], spaceIndexes: [SpaceIndex.max])
         self.axUiElement = axUiElement
         self.admissionEvidence = admissionEvidence
         semanticSurface = nil
         self.application = application
         self.axStatus = axStatus
-        lifecycle = axUiElement == nil ? .unverified : .alive
-        cgWindowId = wid
+        self.lifecycle = axUiElement == nil ? .unverified : .alive
         // Default a new window to the current Space rather than fetching its Space here: that fetch is a
         // blocking CGS call and `Window.init` runs on the main thread (#5721). A brand-new window is on the
         // current Space ~always; the rare exception (an app restoring a window onto another Space) is
@@ -152,11 +116,8 @@ class Window {
     }
 
     init(_ application: Application) {
-        storedState = WindowState(
-            id: "pid-\(application.pid)", isPhantom: false, isWindowlessApp: true,
-            isFullscreen: false, isMinimized: false, isTabbed: false,
-            isOnAllSpaces: false, spaceIds: [CGSSpaceID.max], spaceIndexes: [SpaceIndex.max],
-            lastFocusOrder: .zero, creationOrder: .zero, title: "")
+        tracked = TrackedWindow(id: "pid-\(application.pid)", wid: nil, pid: application.pid,
+            spaceIds: [CGSSpaceID.max], spaceIndexes: [SpaceIndex.max], isWindowlessApp: true)
         admissionEvidence = .discovery
         semanticSurface = nil
         self.application = application
@@ -181,7 +142,7 @@ class Window {
         self.position = position
         self.isFullscreen = isFullscreen ?? false
         self.isMinimized = isMinimized ?? false
-        isFullscreenMirrored = false
+        self.isFullscreenMirrored = false
         lastSearchQuery = nil
     }
 
@@ -195,7 +156,7 @@ class Window {
         self.position = position
         self.size = size
         self.isFullscreen = isFullscreen
-        isFullscreenMirrored = false
+        self.isFullscreenMirrored = false
         return changed
     }
 
@@ -211,7 +172,7 @@ class Window {
     ///   a group is the `TabGroups` registry's decision, not phantom detection's;
     /// - otherwise `PhantomWindowDetector.syncVerdict` over the stored record: the strong signal (no Space
     ///   at all — Joplin / Sprig / `show:false` Electron) evaluated live, OR'd with the latched CGS verdict
-    ///   (`storedState.isPhantom`, the only place the weak/alpha=0 case can come from — owned by
+    ///   (`tracked.cgsPhantomLatch`, the only place the weak/alpha=0 case can come from — owned by
     ///   `applyCgsPhantomVerdict`) — see #5714.
     var isPhantom: Bool {
         if let wid = cgWindowId {
@@ -224,14 +185,14 @@ class Window {
             // sweep, rec22). Without the exemption they fall to their own facts: phantom, hidden, sweepable.
             if let gid = TabGroups.groupId(of: wid), TabGroups.hasScreenClaim(gid) { return false }
         }
-        return PhantomWindowDetector.syncVerdict(storedState, application.state,
-            isOrderedIn: isOrderedIn, alpha: alpha)
+        return PhantomWindowDetector.syncVerdict(tracked.storedWindowState, application.state,
+            isOrderedIn: self.isOrderedIn, alpha: self.alpha)
     }
 
-    /// The raw latched CGS verdict (`storedState.isPhantom`) — what `TrackedWindowStateBridge` snapshots into
-    /// `TrackedWindow.cgsPhantomLatch`. Never read this as the user-facing phantom; that's the derived
-    /// `isPhantom` above.
-    var cgsPhantomLatch: Bool { storedState.isPhantom }
+    /// The raw latched CGS verdict. Get-only on purpose: writing it must go through the two methods below,
+    /// which is what keeps the latch's clearing rules in one place. Never read this as the user-facing
+    /// phantom; that's the derived `isPhantom` above.
+    var cgsPhantomLatch: Bool { tracked.cgsPhantomLatch }
 
     /// Store the authoritative CGS verdict (~250ms post-show, both signals — the only path that can SET the
     /// weak/alpha=0 case). Returns whether the derived `isPhantom` changed, so callers skip a re-render when
@@ -239,7 +200,7 @@ class Window {
     @discardableResult
     func applyCgsPhantomVerdict(_ verdict: Bool) -> Bool {
         let before = isPhantom
-        storedState.isPhantom = verdict
+        tracked.cgsPhantomLatch = verdict
         return isPhantom != before
     }
 
@@ -248,7 +209,7 @@ class Window {
     /// window becomes its group's representative (the group's chosen visible tab is authoritatively not a
     /// phantom, and a latch taken while it was mid-transition must not outlive the group).
     func clearCgsPhantomLatch() {
-        storedState.isPhantom = false
+        tracked.cgsPhantomLatch = false
     }
 
     /// A real window that just un-phantomed (its Space membership recovered) may belong to an app still
@@ -273,7 +234,7 @@ class Window {
     /// would hit a dead node; swap in the freshly-resolved element.
     func rebindAxElement(_ fresh: AXUIElement) {
         axUiElement = fresh
-        lifecycle = .alive
+        self.lifecycle = .alive
         mirrorAxElementForDestroyMatching()
     }
 
@@ -299,7 +260,7 @@ class Window {
         guard WindowThumbnails.acceptCapture(self, screenshot) else { return }
         thumbnail = screenshot
         if !SwitcherSession.isActive || !shouldShowTheUser { return }
-        if let position, let size,
+        if let position = self.position, let size = self.size,
            let view = (TilesView.recycledViews.first { $0.window_?.cgWindowId == cgWindowId }) {
             if !view.thumbnail.isHidden {
                 let thumbnailSize = TileView.thumbnailSize(size, false)
@@ -528,7 +489,7 @@ class Window {
             spaceIds = activeTab.spaceIds
             borrowed = !spaceIds.isEmpty
         }
-        spaceIsBorrowed = borrowed
+        self.spaceIsBorrowed = borrowed
         self.spaceIds = spaceIds
         self.spaceIndexes = spaceIds.compactMap { spaceId in Spaces.idsAndIndexes.first { $0.0 == spaceId }?.1 }
         self.isOnAllSpaces = spaceIds.count > 1

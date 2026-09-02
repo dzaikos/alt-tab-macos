@@ -5,10 +5,9 @@ import Cocoa
 /// the resulting state back onto the live objects, EXECUTE the effects with the exact calls the adapters
 /// used to make inline. Runs synchronously on the main thread, so the snapshot can't race the model.
 ///
-/// Apply writes only the fields the reducer owns (Space membership + synthetic markers, the mirrored
-/// fullscreen/minimized, the CGS latch, the MRU order, the registry tables, the pending sets) — everything
-/// else on `Window` (thumbnail pixels, AX element, screenId…) stays shell-owned and is touched through
-/// effects.
+/// The per-window half of that is ONE value, not a field list: a live `Window` holds its `TrackedWindow`
+/// (`Window.tracked`), so snapshot reads it and apply hands the reduced one back whole. Everything else on
+/// `Window` (thumbnail pixels, AX element, screenId…) stays shell-owned and is touched through effects.
 class TrackedWindowStateBridge {
     /// Orchestration state with no live-model home — the activation entries, the handover halves, the
     /// off-screen set. Parked here between dispatches, as ONE value: this used to be a field-per-static, and
@@ -82,12 +81,14 @@ class TrackedWindowStateBridge {
         return "\(name) #\(full[wid].dropFirst(5))"
     }
 
-    /// This builds a FRESH `TrackedWindowState()` per dispatch, so a field it does not repopulate is not
-    /// "occasionally stale": it is empty at the start of every single input, and any set written by one event
-    /// and read by the next silently never fires. No replay test can catch that — `TestReducerRunner` threads
-    /// one state through the whole scenario and never round-trips it through here — so the reducer's unit
-    /// tests pass green against an app in which the feature does nothing at all. Eight fields shipped that
-    /// way; `state.carried` and `TrackedWindowStateFieldsTests` exist so it cannot happen again silently.
+    /// This builds a FRESH `TrackedWindowState()` per dispatch, so a state-level field it does not
+    /// repopulate is not "occasionally stale": it is empty at the start of every single input, and any set
+    /// written by one event and read by the next silently never fires. No replay test can catch that —
+    /// `TestReducerRunner` threads one state through the whole scenario and never round-trips it through
+    /// here — so the reducer's unit tests pass green against an app in which the feature does nothing at
+    /// all. Eight fields shipped that way; `state.carried` and `TrackedWindowStateFieldsTests` exist so it
+    /// cannot happen again silently. The PER-WINDOW fields are immune by construction: they are one value
+    /// the live `Window` stores, not a copy this file has to remember to make.
     ///
     /// Everything else here is a PROJECTION of the live model and is rebuilt from it, which is why those
     /// fields need no parking: `Windows.list`, the app list, `TabGroups.table`, the `Windows.*` pending sets,
@@ -125,26 +126,13 @@ class TrackedWindowStateBridge {
         return state
     }
 
-    /// `Window` → the pure record. Also used by `TabGroups.repPicker`, the one group mutation still made
-    /// against the live model, so that path reaches the kernels through the SAME projection this one does.
-    static func modelWindow(_ w: Window) -> TrackedWindow {
-        TrackedWindow(id: w.id, wid: w.cgWindowId, pid: w.application.pid, title: w.title,
-            size: w.size, position: w.position,
-            spaceIds: w.spaceIds, spaceIndexes: w.spaceIndexes, isOnAllSpaces: w.isOnAllSpaces,
-            spaceIsBorrowed: w.spaceIsBorrowed,
-            isFullscreen: w.isFullscreen, isFullscreenMirrored: w.isFullscreenMirrored,
-            isMinimized: w.isMinimized, isMainWindow: w.isMainWindow,
-            isWindowlessApp: w.isWindowlessApp, cgsPhantomLatch: w.cgsPhantomLatch,
-            isOrderedIn: w.isOrderedIn, alpha: w.alpha, lastLeftSpaceId: w.lastLeftSpaceId,
-            replacedByWid: w.replacedByWid, replacedWid: w.replacedWid, tabCount: w.tabCount,
-            tabGroupObservation: w.tabGroupObservation,
-            spaceMembershipObservation: w.spaceMembershipObservation,
-            focusedAt: w.focusedAt, lastFocusOrder: w.lastFocusOrder, creationOrder: w.creationOrder,
-            hasThumbnail: w.thumbnail != nil, lifecycle: w.lifecycle)
-    }
+    /// `Window` → the pure record: the live object HOLDS one, so this is a read and not a copy (see
+    /// `Window.tracked`). Also used by `TabGroups.repPicker`, the one group mutation still made against the
+    /// live model, so that path reaches the kernels through the SAME projection this one does.
+    static func modelWindow(_ w: Window) -> TrackedWindow { w.tracked }
 
-    /// Write the reduced state back onto the live model. Field writes are compare-and-set so an untouched
-    /// window stays untouched (same as the adapters' in-place mutations).
+    /// Write the reduced state back onto the live model. The per-window half is one assignment
+    /// (`Window.adopt`); what remains here are the state-level fields, which have no single owner to hand to.
     static func apply(_ state: TrackedWindowState) {
         TabGroups.replace(state.groups)
         Windows.windowsHeldVisibleForTab = state.held
@@ -170,36 +158,7 @@ class TrackedWindowStateBridge {
         }
         for mw in state.windows {
             guard let w = liveWindow(mw) else { continue }
-            // EVERY field the reducer can write must be written back here, or the live model silently
-            // freezes while the pure state moves on (rec24: position/size were missing, so no WS
-            // move/resize ever reached the live window — the tile and Preview kept the discovery-time
-            // frame forever). TrackedWindow fields NOT written back, and why: id/wid/pid/isWindowlessApp/
-            // creationOrder (identity, shell-assigned), title (shell ingests it before dispatch),
-            // hasThumbnail (the pixels move via the copyThumbnail effect).
-            if w.position != mw.position { w.position = mw.position }
-            if w.size != mw.size { w.size = mw.size }
-            if w.spaceIds != mw.spaceIds { w.spaceIds = mw.spaceIds }
-            if w.spaceIndexes != mw.spaceIndexes { w.spaceIndexes = mw.spaceIndexes }
-            if w.isOnAllSpaces != mw.isOnAllSpaces { w.isOnAllSpaces = mw.isOnAllSpaces }
-            if w.spaceIsBorrowed != mw.spaceIsBorrowed { w.spaceIsBorrowed = mw.spaceIsBorrowed }
-            if w.isFullscreen != mw.isFullscreen { w.isFullscreen = mw.isFullscreen }
-            if w.isFullscreenMirrored != mw.isFullscreenMirrored { w.isFullscreenMirrored = mw.isFullscreenMirrored }
-            if w.isMinimized != mw.isMinimized { w.isMinimized = mw.isMinimized }
-            if w.isMainWindow != mw.isMainWindow { w.isMainWindow = mw.isMainWindow }
-            if w.cgsPhantomLatch != mw.cgsPhantomLatch { w.applyCgsPhantomVerdict(mw.cgsPhantomLatch) }
-            if w.focusedAt != mw.focusedAt { w.focusedAt = mw.focusedAt }
-            if w.lastFocusOrder != mw.lastFocusOrder { w.lastFocusOrder = mw.lastFocusOrder }
-            if w.lastLeftSpaceId != mw.lastLeftSpaceId { w.lastLeftSpaceId = mw.lastLeftSpaceId }
-            if w.replacedByWid != mw.replacedByWid { w.replacedByWid = mw.replacedByWid }
-            if w.replacedWid != mw.replacedWid { w.replacedWid = mw.replacedWid }
-            if w.tabCount != mw.tabCount { w.tabCount = mw.tabCount }
-            if w.tabGroupObservation != mw.tabGroupObservation { w.tabGroupObservation = mw.tabGroupObservation }
-            if w.spaceMembershipObservation != mw.spaceMembershipObservation {
-                w.spaceMembershipObservation = mw.spaceMembershipObservation
-            }
-            if w.isOrderedIn != mw.isOrderedIn { w.isOrderedIn = mw.isOrderedIn }
-            if w.alpha != mw.alpha { w.alpha = mw.alpha }
-            if w.lifecycle != mw.lifecycle { w.lifecycle = mw.lifecycle }
+            w.adopt(mw)
         }
     }
 

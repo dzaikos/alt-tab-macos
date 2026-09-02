@@ -2,8 +2,9 @@ import Foundation
 
 /// The canonical, test-constructible data record of a `Window`. One type, used by every kernel that
 /// operates on window facts (`WindowFilterResolver`, `WindowOrderResolver`, `ExceptionMatcher`) —
-/// replaces the per-feature mirror structs. Held as a stored `var state: WindowState` on the live
-/// `Window` class (mutated in place when window data changes) and constructed directly in tests.
+/// replaces the per-feature mirror structs. DERIVED, not stored: both sides project it from the record
+/// they hold (`TrackedWindow.storedWindowState`, then the derived facts patched in by `Window.state` or
+/// `TrackedWindowState.windowState(_:)`). Constructed directly in tests.
 ///
 /// **No nested `ApplicationState`**: kernels that also need application facts take it as a separate
 /// parameter alongside the window state. This avoids two mutable copies of the same app data going
