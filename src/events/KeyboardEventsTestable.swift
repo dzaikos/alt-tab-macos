@@ -14,7 +14,9 @@ func handleKeyboardEvent(_ globalId: Int?, _ shortcutState: ShortcutState?, _ ke
     if let event, shouldAbsorbSearchEditingKeyDown(event) {
         switch TilesView.handleSearchEditingKeyDown(event) {
         case .handled: return true
-        case .passToField: return false
+        case .passToField:
+            TilesView.giveTheFieldTheCaretNow()
+            return false
         case .passToShortcuts: break
         }
     }

@@ -68,9 +68,30 @@ class App: AppCenterApplication {
     }
 
     static func hideUi(_ keepPreview: Bool = false) {
+        guard beginHideUi(keepPreview) else { return }
+        endHideUi()
+    }
+
+    /// The part of the dismissal the user can see. `focusSelectedWindow` runs it before asking for the
+    /// focus, so the two things the user is waiting for are both out before any bookkeeping.
+    /// Returns false when the switcher was already hidden.
+    private static func beginHideUi(_ keepPreview: Bool) -> Bool {
         Logger.debug { "active:\(SwitcherSession.isActive)" }
-        guard SwitcherSession.current != nil else { return } // already hidden
+        guard SwitcherSession.current != nil else { return false } // already hidden
         SwitcherSession.current = nil
+        hideTilesPanelWithoutChangingKeyWindow()
+        if !keepPreview {
+            PreviewPanel.hide()
+        }
+        return true
+    }
+
+    /// The rest of the dismissal, none of it visible. Kept behind the focus request because
+    /// `TilesView.endSearchSession` can stall on the OS text-input services (#5981).
+    private static func endHideUi() {
+        // Two event-server round trips (`tapIsEnabled`, then `tapEnable`), measured at up to 8ms on
+        // macOS 26.6.2. Behind the focus request rather than in front of it: the tap's callback already
+        // passes Esc through once `SwitcherSession.isActive` is false, so nothing absorbs a key in the gap.
         KeyboardEvents.updateEscapeAbsorptionTap() // session closed: stop tapping keyDown (#5766)
         UsageStats.resetSession()
         TilesView.endSearchSession()
@@ -78,10 +99,6 @@ class App: AppCenterApplication {
         CursorEvents.toggle(false)
         TrackpadEvents.reset()
         Tooltips.hideAll()
-        hideTilesPanelWithoutChangingKeyWindow()
-        if !keepPreview {
-            PreviewPanel.hide()
-        }
         MainMenu.toggle(true)
         ProTransitionManager.shared.onSwitcherDismissed()
     }
@@ -272,8 +289,7 @@ class App: AppCenterApplication {
     }
 
     static func focusSelectedWindow(_ selectedWindow: Window?) {
-        guard SwitcherSession.isActive else { return } // already hidden
-        hideUi(true)
+        guard beginHideUi(true) else { return } // already hidden
         if let window = selectedWindow, MissionControl.state() == .inactive || MissionControl.state() == .showDesktop {
             window.focus()
             if Preferences.cursorFollowFocus == .always || (
@@ -283,6 +299,7 @@ class App: AppCenterApplication {
         } else {
             PreviewPanel.hide()
         }
+        endHideUi()
     }
 
     static func moveCursorToSelectedWindow(_ window: Window) {
