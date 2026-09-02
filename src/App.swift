@@ -27,6 +27,9 @@ class App: AppCenterApplication {
     static var openAccountAction: Selector { #selector(App.openAccount) }
     static var isTerminating = false
     private static var isVeryFirstSummon = true
+    /// How long the panel waits for the launch inventory when the very first summon arrives before it
+    /// (`showUiOrCycleSelection`). One inventory lands ~280ms after it is asked for, measured.
+    private static let launchInventoryGraceInMs = 400
     private static var pendingShowSettingsWindow = false
     private static var firstLaunchSettingsObserver: NSObjectProtocol?
     // periphery:ignore
@@ -335,6 +338,7 @@ class App: AppCenterApplication {
         UsageStats.recordTrigger(shortcutIndex)
         if session.isFirstSummon || shortcutIndex != session.shortcutIndex {
             NSScreen.updatePreferred()
+            let isLaunchSummon = isVeryFirstSummon
             if isVeryFirstSummon {
                 Windows.endStartupOrderSeeding()
                 isVeryFirstSummon = false
@@ -353,13 +357,23 @@ class App: AppCenterApplication {
             }
             if !Windows.updatesBeforeShowing() { hideUi(); return }
             Windows.setInitialSelectedAndHoveredWindowIndex()
-            if Preferences.windowDisplayDelay == DispatchTimeInterval.milliseconds(0) {
+            // The very first summon of a launch can beat the launch inventory: AltTab has been alive for a
+            // few hundred milliseconds, nothing has been discovered yet, and the panel opens EMPTY and fills
+            // itself under the user's eyes a beat later. Nobody is served by that frame. Ask for the scan
+            // now and let the panel wait for it — capped, because a desktop that genuinely has no window
+            // still has to be told so, and measured against the ~280ms an inventory takes to land.
+            let awaitingLaunchInventory = isLaunchSummon && Windows.list.isEmpty
+            if awaitingLaunchInventory { Applications.manuallyRefreshAllWindows() }
+            let displayDelay = awaitingLaunchInventory
+                ? DispatchTimeInterval.milliseconds(max(Preferences.windowDisplayDelayInMs, launchInventoryGraceInMs))
+                : Preferences.windowDisplayDelay
+            if displayDelay == DispatchTimeInterval.milliseconds(0) {
                 buildUiAndShowPanel()
             } else {
                 delayedDisplayScheduled += 1
-                DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + Preferences.windowDisplayDelay) { () -> () in
+                DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + displayDelay) { () -> () in
                     if delayedDisplayScheduled == 1 {
-                        buildUiAndShowPanel()
+                        buildUiAndShowPanel(true)
                     }
                     delayedDisplayScheduled -= 1
                 }
@@ -370,8 +384,14 @@ class App: AppCenterApplication {
         }
     }
 
-    static func buildUiAndShowPanel() {
+    static func buildUiAndShowPanel(_ listChangedSincePress: Bool = false) {
         guard SwitcherSession.isActive else { return }
+        // A delayed show renders a list that was filtered at the PRESS. Windows discovered during the delay
+        // are appended with `shouldShowTheUser` still at its default `true`, and the repaint that would
+        // filter them is throttled at 200ms — so the first frame can draw a window the filters exclude.
+        // Measured on a cold start: three tabs of a 4-tab Finder group were adopted 28ms before the grace
+        // expired, and the group opened unfolded as 3 tiles, then folded a beat later (QA C-01).
+        if listChangedSincePress, !Windows.updatesBeforeShowing() { hideUi(); return }
         Appearance.update()
         guard SwitcherSession.isActive else { return }
         TilesView.swapBackgroundViewIfNeeded()

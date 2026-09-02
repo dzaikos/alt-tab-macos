@@ -211,7 +211,22 @@ class Applications {
                 // arrives (Window.init) or when an existing window un-phantoms (Window.updateSpaces), so a
                 // window that recovers its Space after a fullscreen transition clears the stale placeholder
                 // instead of leaving both the window tile and the icon tile shown.
-                for app in list { _ = app.addWindowlessWindowIfNeeded() }
+                //
+                // An app whose surfaces are still being acquired is not windowless: this very enumeration
+                // just proved it owns a window, and only the AX element is missing. Measured 2026-09-02 on a
+                // cold start: this sweep landed 34ms before the acquisition, and a summon in that gap drew
+                // Finder, Chrome, ChatGPT and TextEdit as four icon placeholders (QA C-01).
+                //
+                // The placeholders also DEFEATED the fix for that frame. `App.showUiOrCycleSelection` waits
+                // for the launch inventory only while `Windows.list` is empty, and four placeholders are not
+                // empty, so the panel opened immediately on them instead of taking its grace period.
+                //
+                // The suppression is lifted by the batch itself, in `scheduleSurfaceAcquisitions`, not by a
+                // later sweep — sweeps are event-driven, so there may not be one.
+                let pidsAcquiringSurfaces = Set(acquisitionRequests.map { $0.raw.pid })
+                for app in list where !pidsAcquiringSurfaces.contains(app.pid) {
+                    _ = app.addWindowlessWindowIfNeeded()
+                }
                 // phantom detection reuses this same all-Space fetch; the per-window verdicts + latches are
                 // the reducer's `.cgsWindowListsRead` branch
                 TrackedWindowStateBridge.dispatch(.cgsWindowListsRead(visible: visibleWids, all: allWids))
@@ -240,6 +255,15 @@ class Applications {
                         }
                         failedAcquisitions[request.raw.wid] = nil
                     }
+                    // The sweep skipped this app's icon placeholder while the batch was in flight, on the
+                    // grounds that a surface being acquired is not a windowless app. When the batch resolves
+                    // NOTHING that has to end here rather than at the next sweep: sweeps are event-driven,
+                    // not periodic, so an app that answers nothing (SIGSTOP'd, hung) can wait indefinitely
+                    // for one — and until then it is absent from the switcher entirely while its windows sit
+                    // on screen, leaving the user no way back to them (QA WL-12). Only on an empty batch: a
+                    // resolved element becomes a `Window` a few main-thread turns later, so testing the app
+                    // for windows here instead would put a placeholder up in that gap.
+                    if elements.isEmpty { _ = app.addWindowlessWindowIfNeeded() }
                 }
                 for request in batch {
                     guard let element = elements[request.raw.wid] else { continue }
