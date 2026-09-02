@@ -65,6 +65,9 @@ class Window {
     /// The WindowServer's ordered-in bit: this window is on screen right now. Owned by the reducer; see
     /// `TrackedWindow.isOrderedIn` for the measurement that makes it the tab-vs-window discriminator.
     var isOrderedIn = false
+    /// The WindowServer's compositing alpha, maintained by the batched WS query. `0` is the alpha-0 phantom
+    /// family (Outlook reminders) stated exactly; see `PhantomWindowDetector`.
+    var alpha: Float = 1
     /// Tab-button count from this window's last AXTabGroup read (0 = none / not tabbed). Owned by the
     /// reducer; see `TabWindow.tabCount` for why the COUNT is trusted where the tab TITLES are not.
     var tabCount = 0
@@ -216,7 +219,8 @@ class Window {
             // sweep, rec22). Without the exemption they fall to their own facts: phantom, hidden, sweepable.
             if let gid = TabGroups.groupId(of: wid), TabGroups.hasScreenClaim(gid) { return false }
         }
-        return PhantomWindowDetector.syncVerdict(storedState, application.state)
+        return PhantomWindowDetector.syncVerdict(storedState, application.state,
+            isOrderedIn: isOrderedIn, alpha: alpha)
     }
 
     /// The raw latched CGS verdict (`storedState.isPhantom`) — what `TrackedWindowStateBridge` snapshots into

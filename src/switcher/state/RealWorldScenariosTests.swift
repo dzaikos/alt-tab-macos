@@ -649,8 +649,10 @@ final class RealWorldScenariosTests: XCTestCase {
         // marks it `isTabbed`, the exemption clears it. This coupling is why a tab-detection regression makes
         // inactive tabs vanish in #5830.
         let bg = Self.terminalMerge4Tabs[1]
-        XCTAssertTrue(PhantomWindowDetector.syncVerdict(bg.windowState(isTabbed: false), Self.terminalApp))
-        XCTAssertFalse(PhantomWindowDetector.syncVerdict(bg.windowState(isTabbed: true), Self.terminalApp))
+        XCTAssertTrue(PhantomWindowDetector.syncVerdict(bg.windowState(isTabbed: false), Self.terminalApp,
+            isOrderedIn: false, alpha: 1))
+        XCTAssertFalse(PhantomWindowDetector.syncVerdict(bg.windowState(isTabbed: true), Self.terminalApp,
+            isOrderedIn: false, alpha: 1))
     }
 
     // MARK: - Space-transition event routing (WsEventRouting)
@@ -1706,8 +1708,10 @@ final class RealWorldScenariosTests: XCTestCase {
     func testFinderInactiveTabIsPhantomUntilTabbed() {
         // "lwouis" is Space-less (inactive tab) → phantom before detection, exempt once `isTabbed`.
         let app = ApplicationState(pid: 779, bundleIdentifier: "com.apple.finder", localizedName: "Finder", isHidden: false)
-        XCTAssertTrue(PhantomWindowDetector.syncVerdict(Self.finderLwouisInactiveTab.windowState(isTabbed: false), app))
-        XCTAssertFalse(PhantomWindowDetector.syncVerdict(Self.finderLwouisInactiveTab.windowState(isTabbed: true), app))
+        XCTAssertTrue(PhantomWindowDetector.syncVerdict(Self.finderLwouisInactiveTab.windowState(isTabbed: false),
+            app, isOrderedIn: false, alpha: 1))
+        XCTAssertFalse(PhantomWindowDetector.syncVerdict(Self.finderLwouisInactiveTab.windowState(isTabbed: true),
+            app, isOrderedIn: false, alpha: 1))
     }
 
     // MARK: - TextEdit: distinct-title tabs + moving a tab between two groups

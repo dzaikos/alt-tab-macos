@@ -62,7 +62,7 @@ final class TrackedWindowStateFieldsTests: XCTestCase {
         // reducer-owned: must be in BOTH `modelWindow()` and `apply()`
         "size", "position", "spaceIds", "spaceIndexes", "isOnAllSpaces", "spaceIsBorrowed",
         "isFullscreen", "isFullscreenMirrored", "isMinimized", "isMainWindow", "cgsPhantomLatch",
-        "isOrderedIn", "lastLeftSpaceId", "replacedByWid", "replacedWid", "tabCount",
+        "isOrderedIn", "alpha", "lastLeftSpaceId", "replacedByWid", "replacedWid", "tabCount",
         "focusedAt", "lastFocusOrder",
     ]
 

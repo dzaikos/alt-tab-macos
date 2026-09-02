@@ -51,6 +51,9 @@ struct TrackedWindow: Equatable {
     /// Defaults FALSE = "not known to be on screen", which is the reading that changes no existing decision:
     /// every rule below only ever refuses a fold on a TRUE.
     var isOrderedIn = false
+    /// The WindowServer's compositing alpha (`WsRawWindow.alpha`). `0` is the alpha-0 phantom family stated
+    /// exactly rather than inferred; 1 is every ordinary window. Defaults to 1 so an unset fixture is opaque.
+    var alpha: Float = 1
     /// The Space this window most recently LEFT (from a 1326), cleared when it joins one again. HISTORY, and
     /// the only thing that distinguishes a tab which just backgrounded inside window A from a brand-new tab
     /// of window B: by current facts both are merely Space-less, same app, same size, unlinked. Genuine CGS
@@ -410,7 +413,8 @@ struct TrackedWindowState: Equatable {
                 !(window(m)?.spaceIds.isEmpty ?? true) || held.contains(m)
             }) { return false }
         }
-        return PhantomWindowDetector.syncVerdict(storedWindowState(w), appState(w.pid))
+        return PhantomWindowDetector.syncVerdict(storedWindowState(w), appState(w.pid),
+            isOrderedIn: w.isOrderedIn, alpha: w.alpha)
     }
 
     // MARK: kernel projections
@@ -666,6 +670,15 @@ struct TrackedWindowState: Equatable {
         windows[i].spaceIndexes = ids.compactMap { spaceIndexById[$0] }
         windows[i].isOnAllSpaces = ids.count > 1
         windows[i].spaceIsBorrowed = false  // a 1325/1326 delta is genuine CGS evidence
+        // **Leaving every Space is leaving the screen, one-directional.** A window on no Space cannot be
+        // composited on any display, so the ordered-in bit cannot still be true — and `PhantomWindowDetector`
+        // now reads that bit, so leaving it set made a Space-less window claim to be on screen and exempted
+        // itself from its own verdict (generator seed 11, and the fullscreen-annexation invariant). The
+        // converse is NOT true and must not be written here: joining a Space says nothing about being shown,
+        // which is exactly what a background tab and a minimized window are. `TabGroupResolver` has applied
+        // this same rule to its own reads for as long as the bit has existed; this is it stated once, at the
+        // mutation, instead of at each reader.
+        if ids.isEmpty { windows[i].isOrderedIn = false }
         // See `Window.updateSpaces`: drop a CGS verdict latched while this window's Spaces were briefly
         // empty (mid Space-transition), now that a Space delta restored membership.
         if wasEmpty, !ids.isEmpty { windows[i].cgsPhantomLatch = false }
@@ -703,6 +716,11 @@ struct WsWindowSnapshot: Equatable {
     /// don't care keep building snapshots as before. Prompt on the way in, LATE on the way out — the reducer
     /// applies the staleness rule, not the caller.
     var isMinimized: Bool = false
+    /// WindowServer compositing alpha, on the batched query AltTab already issues. `0` is one of the two
+    /// phantom families EXACTLY (Outlook reminders, #5170/#5448), where every other route to it is an
+    /// inference — and it is the family AX cannot see at all, since such a window is listed as an ordinary
+    /// `AXStandardWindow`. Defaults to 1 (opaque) so a fixture that does not care decides nothing.
+    var alpha: Float = 1
 }
 
 /// One step of the orchestration: a WindowServer event, an async read RESULT landing (AX attributes /

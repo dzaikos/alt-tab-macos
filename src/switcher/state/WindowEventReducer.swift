@@ -91,9 +91,9 @@ enum WindowEventReducer {
             // later input converges from (the harness's fixed-point check catches exactly that). This is the
             // geometry/normalize pass, NOT the AX tab re-read the comment below rules out.
             var orderedOutEffects = [ReducerEffect]()
-            if let i = state.windowIndex(wid) {
-                state.windows[i].isOrderedIn = false
-                orderedOutEffects = reconcile(&state)
+            if state.windowIndex(wid) != nil {
+                orderedOutEffects = orderedInPhantomEdge(&state, wid: wid) { $0.windows[$1].isOrderedIn = false }
+                orderedOutEffects += reconcile(&state)
             }
             // A tracked window left the screen: closed, or merely minimized / hidden / moved to another
             // Space. WS's destroy event (804) lags a real close by seconds — or never fires — for apps
@@ -177,6 +177,22 @@ enum WindowEventReducer {
 
     // MARK: - WS-event branches (was `WindowServerEvents.route`)
 
+    /// The phantom edge around a write to `isOrderedIn`. The ordered-in bit is now one of the two facts the
+    /// verdict is made of (`PhantomWindowDetector`), so flipping it can flip the derived phantom — and a
+    /// flip that emits no placeholder effect is the duplicate-tile / no-tile-at-all bug of #5849, which
+    /// every OTHER phantom-moving path already guards (`applySpaceMembershipDelta`, `applyWindowSpaces`,
+    /// `cgsWindowListsRead`). Call around the write, never instead of it.
+    private static func orderedInPhantomEdge(_ state: inout TrackedWindowState, wid: CGWindowID,
+                                             _ write: (inout TrackedWindowState, Int) -> Void) -> [ReducerEffect] {
+        guard let i = state.windowIndex(wid) else { return [] }
+        let before = state.isPhantom(state.windows[i])
+        write(&state, i)
+        guard state.isPhantom(state.windows[i]) != before, !state.windows[i].isWindowlessApp else { return [] }
+        let pid = state.windows[i].pid
+        if before { return [.removeWindowlessPlaceholder(pid: pid)] }
+        return appHasRealWindow(state, pid: pid) ? [] : [.addWindowlessPlaceholder(pid: pid)]
+    }
+
     /// moved/resized/ordered-in. Tracked → refresh just that window's WindowServer facts (geometry,
     /// fullscreen) from a WS query, NOT an AX read; coalesced per-wid so a resize drag collapses to ≤1
     /// query/200ms. An order-in also re-reads kAXMinimized (de-minimize has no dedicated WS event) but does
@@ -197,7 +213,9 @@ enum WindowEventReducer {
             // this function also serves 806/807 move/resize (`orderedIn: false` there, meaning "not an
             // order-in", NOT "off screen"), so writing the flag unconditionally asserted that every window
             // being dragged or resized had left the screen. The 816 clears the bit, in its own branch.
-            if orderedIn, let i = state.windowIndex(wid) { state.windows[i].isOrderedIn = true }
+            if orderedIn {
+                effects += orderedInPhantomEdge(&state, wid: wid) { $0.windows[$1].isOrderedIn = true }
+            }
             if orderedIn {
                 effects.append(.readTitleAndTabs(wid: wid, readTabs: false))
                 // An order-in of a window we believe is MINIMIZED is the un-minimize, and the WindowServer is
@@ -1098,7 +1116,8 @@ enum WindowEventReducer {
             guard let i = state.windowIndex(snap.wid) else { continue }
             var changed = state.windows[i].position != snap.position || state.windows[i].size != snap.size
                 || state.windows[i].isFullscreen != snap.isFullscreen
-                || state.windows[i].isOrderedIn != snap.isVisible
+                || (state.windows[i].isOrderedIn != snap.isVisible
+                    && !(!snap.isVisible && snap.isMinimized && !state.carried.offScreen.contains(snap.wid)))
             state.windows[i].position = snap.position
             state.windows[i].size = snap.size
             state.windows[i].isFullscreen = snap.isFullscreen
@@ -1106,7 +1125,38 @@ enum WindowEventReducer {
             // The ordered-in bit, straight from the same snapshot. Tab-grouping reads it to refuse folding a
             // window the WindowServer still shows on screen (see `TrackedWindow.isOrderedIn`); it is not a
             // visibility decision of ours, so it is written whatever else this snapshot says.
-            state.windows[i].isOrderedIn = snap.isVisible
+            let wasPhantom = state.isPhantom(state.windows[i])
+            // **Refuse only the stale PAIR, not every `false`.** On a Dock restore the WindowServer's bits
+            // settle when the animation ends (~644ms, measured), later than the 815 that already put the
+            // window back on screen: the snapshot then says minimized AND off-screen together, both stale.
+            // The minimized write below already refuses its half; believing the other half undid the
+            // order-in, and once `PhantomWindowDetector` started reading this bit that did not merely delay
+            // a tab decision, it flagged the restored window phantom and hid it (generator seed 13,
+            // `newWindow → minimize → restoreFromDock → show`).
+            //
+            // Narrow on purpose. A plain `isVisible: false` with no minimized claim is the query doing the
+            // job only it can do — correcting a window whose order-OUT we never saw — and that must still
+            // land (`testTheWindowServerQueryResyncsTheOnScreenBit`).
+            let staleRestorePair = !snap.isVisible && snap.isMinimized
+                && !state.carried.offScreen.contains(snap.wid)
+            if !staleRestorePair { state.windows[i].isOrderedIn = snap.isVisible }
+            // Alpha, from the same snapshot and for the same reason: it is a fact the WindowServer reports,
+            // not a decision of ours, and `PhantomWindowDetector` needs it stated rather than inferred.
+            if state.windows[i].alpha != snap.alpha {
+                state.windows[i].alpha = snap.alpha
+                changed = true
+            }
+            // Both writes above feed the phantom verdict, so the derived flag can flip here — and a flip with
+            // no placeholder effect is #5849 in one direction or the other.
+            if state.isPhantom(state.windows[i]) != wasPhantom, !state.windows[i].isWindowlessApp {
+                let pid = state.windows[i].pid
+                if wasPhantom {
+                    focusRepairs.append(.removeWindowlessPlaceholder(pid: pid))
+                } else if !appHasRealWindow(state, pid: pid) {
+                    focusRepairs.append(.addWindowlessPlaceholder(pid: pid))
+                }
+                changed = true
+            }
             // Minimized comes from this query now rather than from an AX read into the window's own app.
             // The bit is prompt on the way IN (~35ms) but LATE on the way OUT — on a Dock restore it only
             // clears when the animation ends, ~644ms after the order-in that already put the window back on
@@ -1185,16 +1235,17 @@ enum WindowEventReducer {
         var changed = [CGWindowID]()
         for i in state.windows.indices {
             guard let wid = state.windows[i].wid, wid != CGWindowID(bitPattern: -1) else { continue }
-            // "the user is looking at it": front of the MRU AND its app is frontmost. `.applyFocus` only
-            // reaches the live model, so the MRU order the reducer already owns is the focus fact here.
-            let isFocused = state.windows[i].lastFocusOrder == 0
-                && (state.apps[state.windows[i].pid]?.isActive ?? false)
+            // No focus exemption any more. It existed because CGS keeps a reopened Electron window tagged
+            // invisible for seconds after it is on screen and focused (#5849), and the weak signal read that
+            // tag; the ordered-in bit says the window is on screen, so the case resolves on a fact instead
+            // of on "but the user is looking at it".
             let verdict = PhantomWindowDetector.cgsVerdict(state.windowState(state.windows[i]),
                 state.appState(state.windows[i].pid),
                 inVisibleList: visible.contains(wid),
                 inAllList: all.contains(wid),
-                visibleSpaceIds: state.visibleSpaces,
-                isFocused: isFocused)
+                isOrderedIn: state.windows[i].isOrderedIn,
+                alpha: state.windows[i].alpha,
+                visibleSpaceIds: state.visibleSpaces)
             let before = state.isPhantom(state.windows[i])
             state.windows[i].cgsPhantomLatch = verdict
             if state.isPhantom(state.windows[i]) != before {

@@ -40,13 +40,19 @@ Mirrors `WindowEventReducerPhantomTests.swift` 1:1.
   nothing: the app is becoming windowless, which is exactly when the placeholder is legitimate.
 - **testNoFlipEmitsNothing** — a steady-state pass emits nothing, so repeated CGS reads don't churn the list.
 
-### B. The focused window is exempt from the weak signal
-- **testFocusedWindowSurvivesTheWeakSignal** — tagged invisible by CGS, but front of the MRU with its app
-  frontmost → not a phantom.
-- **testUnfocusedWindowStillFlaggedByTheWeakSignal** — same window and tagging, app not frontmost → still a
-  phantom.
-- **testNonFrontWindowOfActiveAppStillFlagged** — app frontmost but the window sits at MRU slot 3, so it is
-  not the one the user is looking at → still a phantom.
+### B. An on-screen window is never a phantom
+- **testOnScreenWindowSurvivesTheOrderedOutSignal** — the window is ordered in while CGS still tags it
+  invisible and reports no Space (Slack reopened from the Dock, #5849) → not a phantom. This replaced a
+  FOCUS exemption, which made the verdict depend on MRU order.
+- **testOrderedOutWindowIsFlaggedEvenWhenItsAppIsFrontmost** — the same window while the WindowServer is not
+  showing it → phantom, frontmost or not.
+- **testOrderedOutWindowOfBackgroundAppIsFlagged** — and with the app in the background, so both halves of
+  the former focus rule stay pinned.
+- **testOrderInUnphantomsAndDropsThePlaceholder** — the un-phantom edge now rides the WindowServer order-in,
+  ~250ms before the CGS pass would run, so the placeholder must be dropped from there.
+- **testOrderOutAloneDoesNotPhantomAWindowThatStillHoldsASpace** — the reverse is deliberately NOT symmetric:
+  going off screen is not evidence on its own (a minimize, a Space move and an app-hide all look like it),
+  so only the authoritative pass may latch a phantom.
 
 ### C. Attention clears a stale verdict immediately
 

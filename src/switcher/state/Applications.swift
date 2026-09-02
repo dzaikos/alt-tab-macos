@@ -375,7 +375,7 @@ class Applications {
             let decoded = raws.map { raw in
                 (raw, WsWindowSnapshot(wid: raw.wid, position: raw.bounds.origin, size: raw.bounds.size,
                     isFullscreen: WsWindowState.isFullscreen(raw), isVisible: WsWindowState.isVisible(raw),
-                    isMinimized: WsWindowState.isMinimized(raw)))
+                    isMinimized: WsWindowState.isMinimized(raw), alpha: raw.alpha))
             }
             DispatchQueue.main.async {
                 // Still the query this wid is waiting on? A newer one has bumped the seq, so this answer is

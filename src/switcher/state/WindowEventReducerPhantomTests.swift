@@ -12,13 +12,18 @@ final class WindowEventReducerPhantomTests: XCTestCase {
     private static let otherWid: CGWindowID = 194
 
     /// Slack's real window, on the current Space, latched phantom by an earlier CGS pass.
-    private func slackWindow(latchedPhantom: Bool = true, lastFocusOrder: Int = 0) -> TrackedWindow {
+    ///
+    /// `isOrderedIn` is what the CGS "visible" list used to stand in for. The kernel reads the WindowServer
+    /// bit now, so a test that means "this window is on screen" says so on the window rather than by putting
+    /// its wid in a list argument.
+    private func slackWindow(latchedPhantom: Bool = true, lastFocusOrder: Int = 0,
+                             isOrderedIn: Bool = false) -> TrackedWindow {
         TrackedWindow(id: "wid-\(Self.slackWid)", wid: Self.slackWid, pid: Self.slackPid, title: "Slack",
             size: CGSize(width: 2056, height: 1204), position: CGPoint(x: 0, y: 40),
             spaceIds: [1], spaceIndexes: [1], isOnAllSpaces: false, spaceIsBorrowed: false,
             isFullscreen: false, isFullscreenMirrored: false, isMinimized: false, isMainWindow: false,
-            isWindowlessApp: false, cgsPhantomLatch: latchedPhantom, lastFocusOrder: lastFocusOrder,
-            creationOrder: 1, hasThumbnail: true)
+            isWindowlessApp: false, cgsPhantomLatch: latchedPhantom, isOrderedIn: isOrderedIn,
+            lastFocusOrder: lastFocusOrder, creationOrder: 1, hasThumbnail: true)
     }
 
     /// Another app's window, so the MRU has somewhere to shift a bump to (`bumpFocus` is a no-op on a
@@ -62,10 +67,36 @@ final class WindowEventReducerPhantomTests: XCTestCase {
     /// and won't change even if I wait or switch windows").
     func testUnphantomingEmitsRemoveWindowlessPlaceholder() {
         var s = state([slackWindow(latchedPhantom: true)])
-        let effects = WindowEventReducer.reduce(&s, .cgsWindowListsRead(
-            visible: [Self.slackWid], all: [Self.slackWid]))
-        XCTAssertFalse(s.isPhantom(s.windows[0]), "precondition: the verdict must have cleared")
+        XCTAssertTrue(s.isPhantom(s.windows[0]), "precondition: latched and off screen")
+        let effects = WindowEventReducer.reduce(&s, .cgsWindowListsRead(visible: [], all: [Self.slackWid]))
+        XCTAssertTrue(s.isPhantom(s.windows[0]), "the CGS pass alone cannot clear an off-screen window")
+        XCTAssertFalse(dropsPlaceholder(effects))
+    }
+
+    /// The same flip, on the input that now carries it. The window coming back on screen is a WindowServer
+    /// order-in, which lands ~250ms before the CGS pass would have run — so the placeholder must be dropped
+    /// from THERE, or Slack keeps a real tile and a windowless one at the same time (#5849).
+    func testOrderInUnphantomsAndDropsThePlaceholder() {
+        var s = state([slackWindow(latchedPhantom: true)])
+        XCTAssertTrue(s.isPhantom(s.windows[0]), "precondition: latched and off screen")
+        let effects = WindowEventReducer.reduce(&s, .windowOrderedIn(wid: Self.slackWid, now: 10,
+            inSpaceTransition: false))
+        XCTAssertFalse(s.isPhantom(s.windows[0]))
         XCTAssertTrue(dropsPlaceholder(effects))
+    }
+
+    /// The opposite edge is deliberately NOT symmetric, and this pins the asymmetry so nobody "fixes" it.
+    /// Going off screen is not evidence of anything on its own — a minimize, a Space move and an app-hide
+    /// all look like it — so the synchronous verdict keeps a window that still holds a Space, and only the
+    /// authoritative CGS pass may latch it phantom. Un-phantoming is the direction that can be decided from
+    /// one fact, which is why only that half rides the order event.
+    func testOrderOutAloneDoesNotPhantomAWindowThatStillHoldsASpace() {
+        var s = state([slackWindow(latchedPhantom: false, isOrderedIn: true)])
+        XCTAssertFalse(s.isPhantom(s.windows[0]), "precondition: on screen, not phantom")
+        let effects = WindowEventReducer.reduce(&s, .windowOrderedOut(wid: Self.slackWid,
+            inSpaceTransition: false))
+        XCTAssertFalse(s.isPhantom(s.windows[0]))
+        XCTAssertFalse(effects.contains(.addWindowlessPlaceholder(pid: Self.slackPid)))
     }
 
     /// The reverse flip (real → phantom) must NOT drop a placeholder: the app is becoming windowless, which
@@ -79,35 +110,41 @@ final class WindowEventReducerPhantomTests: XCTestCase {
 
     /// No flip, no effect — a steady-state pass must stay silent, or every CGS read would churn the list.
     func testNoFlipEmitsNothing() {
-        var s = state([slackWindow(latchedPhantom: false)])
+        var s = state([slackWindow(latchedPhantom: false, isOrderedIn: true)])
         let effects = WindowEventReducer.reduce(&s, .cgsWindowListsRead(
             visible: [Self.slackWid], all: [Self.slackWid]))
         XCTAssertFalse(dropsPlaceholder(effects))
     }
 
-    // MARK: - B. The focused window is exempt from the weak signal (#5849)
+    // MARK: - B. An on-screen window is never a phantom (#5849)
 
-    /// Slack reopened from the Dock: CGS still tags the window invisible, but it IS the focused window of
-    /// the frontmost app. It must not be flagged phantom — otherwise it is hidden while still holding MRU
-    /// slot 0, and the switcher's "previously-focused window" default skips a window and lands on the
-    /// wrong app.
-    func testFocusedWindowSurvivesTheWeakSignal() {
-        var s = state([slackWindow(latchedPhantom: false, lastFocusOrder: 0)], appIsActive: true)
+    /// Slack reopened from the Dock: CGS still tags the window invisible and reports no Space for it, while
+    /// the WindowServer has it ordered in. It must not be flagged phantom — otherwise it is hidden while
+    /// still holding MRU slot 0, and the switcher's "previously-focused window" default skips a window and
+    /// lands on the wrong app.
+    ///
+    /// This used to be a FOCUS exemption, which meant threading "front of the MRU and its app is frontmost"
+    /// into a pure kernel and made the verdict depend on window order — the coupling that made three
+    /// separate attempts at #5954 regress. The ordered-in bit answers it as a fact about the window.
+    func testOnScreenWindowSurvivesTheOrderedOutSignal() {
+        var s = state([slackWindow(latchedPhantom: false, lastFocusOrder: 0, isOrderedIn: true)],
+                      appIsActive: true)
         _ = WindowEventReducer.reduce(&s, .cgsWindowListsRead(visible: [], all: [Self.slackWid]))
         XCTAssertFalse(s.isPhantom(s.windows[0]))
     }
 
-    /// Same window, same CGS tagging, but its app is NOT frontmost → the weak signal still applies.
-    func testUnfocusedWindowStillFlaggedByTheWeakSignal() {
-        var s = state([slackWindow(latchedPhantom: false, lastFocusOrder: 0)], appIsActive: false)
+    /// The same window while the WindowServer is NOT showing it: that is the `orderOut:` / `show:false`
+    /// family, and it is a phantom whether or not its app happens to be frontmost.
+    func testOrderedOutWindowIsFlaggedEvenWhenItsAppIsFrontmost() {
+        var s = state([slackWindow(latchedPhantom: false, lastFocusOrder: 0)], appIsActive: true)
         _ = WindowEventReducer.reduce(&s, .cgsWindowListsRead(visible: [], all: [Self.slackWid]))
         XCTAssertTrue(s.isPhantom(s.windows[0]))
     }
 
-    /// The app is frontmost but this window is not the one in front (MRU slot 3), so it is not the window
-    /// the user is looking at and stays subject to the weak signal.
-    func testNonFrontWindowOfActiveAppStillFlagged() {
-        var s = state([slackWindow(latchedPhantom: false, lastFocusOrder: 3)], appIsActive: true)
+    /// And with the app in the background, which is where the old focus exemption did not apply either —
+    /// kept so the two halves of that former rule are both still pinned.
+    func testOrderedOutWindowOfBackgroundAppIsFlagged() {
+        var s = state([slackWindow(latchedPhantom: false, lastFocusOrder: 3)], appIsActive: false)
         _ = WindowEventReducer.reduce(&s, .cgsWindowListsRead(visible: [], all: [Self.slackWid]))
         XCTAssertTrue(s.isPhantom(s.windows[0]))
     }
@@ -180,7 +217,7 @@ final class WindowEventReducerPhantomTests: XCTestCase {
     /// is the duplicate-tile bug in the other direction.
     func testPhantomWithAnotherRealWindowLeftEmitsNoAdd() {
         let secondWid: CGWindowID = Self.slackWid + 1
-        var second = slackWindow(latchedPhantom: false, lastFocusOrder: 1)
+        var second = slackWindow(latchedPhantom: false, lastFocusOrder: 1, isOrderedIn: true)
         second.wid = secondWid
         second.id = "wid-\(secondWid)"
         var s = state([slackWindow(latchedPhantom: false), second])
@@ -193,7 +230,7 @@ final class WindowEventReducerPhantomTests: XCTestCase {
 
     /// Un-phantoming is the opposite edge and must never ADD one.
     func testUnphantomingEmitsNoAdd() {
-        var s = state([slackWindow(latchedPhantom: true)])
+        var s = state([slackWindow(latchedPhantom: true, isOrderedIn: true)])
         let effects = WindowEventReducer.reduce(&s, .cgsWindowListsRead(
             visible: [Self.slackWid], all: [Self.slackWid]))
         XCTAssertFalse(effects.contains(.addWindowlessPlaceholder(pid: Self.slackPid)))
