@@ -63,7 +63,7 @@ final class TrackedWindowStateFieldsTests: XCTestCase {
         "size", "position", "spaceIds", "spaceIndexes", "isOnAllSpaces", "spaceIsBorrowed",
         "isFullscreen", "isFullscreenMirrored", "isMinimized", "isMainWindow", "cgsPhantomLatch",
         "isOrderedIn", "alpha", "lastLeftSpaceId", "replacedByWid", "replacedWid", "tabCount",
-        "focusedAt", "lastFocusOrder",
+        "tabGroupObservation", "spaceMembershipObservation", "focusedAt", "lastFocusOrder", "lifecycle",
     ]
 
     func testEveryTrackedWindowFieldIsAccountedForByTheBridge() {

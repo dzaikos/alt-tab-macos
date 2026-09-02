@@ -66,7 +66,8 @@ class TrackedWindowStateBridge {
         case .attentionCommitted:
             return false
         case .discoveryLanded, .titleAndTabsRead, .windowServerStateRead, .spacesSynced,
-             .axFocusedWindowRead, .livenessConfirmedDead, .cgsWindowListsRead, .zOrderRead,
+             .axFocusedWindowRead, .livenessConfirmedDead, .axElementEnded, .axElementReconciled,
+             .cgsWindowListsRead, .zOrderRead,
              .holdReleaseCheck, .dragOutCheck, .altTabFocusedWindowInFrontmostApp, .axFocusedWindowReadFailed:
             return false
         }
@@ -136,8 +137,10 @@ class TrackedWindowStateBridge {
             isWindowlessApp: w.isWindowlessApp, cgsPhantomLatch: w.cgsPhantomLatch,
             isOrderedIn: w.isOrderedIn, alpha: w.alpha, lastLeftSpaceId: w.lastLeftSpaceId,
             replacedByWid: w.replacedByWid, replacedWid: w.replacedWid, tabCount: w.tabCount,
+            tabGroupObservation: w.tabGroupObservation,
+            spaceMembershipObservation: w.spaceMembershipObservation,
             focusedAt: w.focusedAt, lastFocusOrder: w.lastFocusOrder, creationOrder: w.creationOrder,
-            hasThumbnail: w.thumbnail != nil)
+            hasThumbnail: w.thumbnail != nil, lifecycle: w.lifecycle)
     }
 
     /// Write the reduced state back onto the live model. Field writes are compare-and-set so an untouched
@@ -190,8 +193,13 @@ class TrackedWindowStateBridge {
             if w.replacedByWid != mw.replacedByWid { w.replacedByWid = mw.replacedByWid }
             if w.replacedWid != mw.replacedWid { w.replacedWid = mw.replacedWid }
             if w.tabCount != mw.tabCount { w.tabCount = mw.tabCount }
+            if w.tabGroupObservation != mw.tabGroupObservation { w.tabGroupObservation = mw.tabGroupObservation }
+            if w.spaceMembershipObservation != mw.spaceMembershipObservation {
+                w.spaceMembershipObservation = mw.spaceMembershipObservation
+            }
             if w.isOrderedIn != mw.isOrderedIn { w.isOrderedIn = mw.isOrderedIn }
             if w.alpha != mw.alpha { w.alpha = mw.alpha }
+            if w.lifecycle != mw.lifecycle { w.lifecycle = mw.lifecycle }
         }
     }
 
@@ -265,6 +273,10 @@ class TrackedWindowStateBridge {
                 App.refreshOpenUiImmediatelyAfterExternalEvent(wids.compactMap { Windows.byWindowId[$0] })
             case .removeWindow(let wid):
                 if let w = Windows.byWindowId[wid] { Windows.removeWindows([w], true) }
+            case .reconcileAxElementEnd(let wid):
+                Applications.reconcileAxElementEnd(wid)
+            case .retireSurface(let wid):
+                Windows.retireSurfaceForReplacement(wid)
             case .deferCaptureUntilRestoreEnds(let wid):
                 if let w = Windows.byWindowId[wid] { WindowThumbnails.deferCaptureUntilRestoreEnds(w) }
             case .copyThumbnail(let from, let to):
@@ -278,7 +290,6 @@ class TrackedWindowStateBridge {
             case .refreshSpacesTopology:
                 Spaces.refresh()
             case .refreshSpacesTopologyAndSync:
-                Spaces.refresh()
                 Applications.syncSpacesState()
             case .updateScreenId(let wid):
                 Windows.byWindowId[wid]?.updateScreenId()

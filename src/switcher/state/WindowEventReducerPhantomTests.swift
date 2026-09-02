@@ -59,6 +59,14 @@ final class WindowEventReducerPhantomTests: XCTestCase {
         effects.contains(.removeWindowlessPlaceholder(pid: Self.slackPid))
     }
 
+    func testSnapshotSilenceDoesNotJudgeAWindowCreatedAfterIssue() {
+        var s = state([slackWindow(latchedPhantom: false)])
+        let effects = WindowEventReducer.reduce(&s,
+            .cgsWindowListsRead(visible: [], all: [], queried: []))
+        XCTAssertFalse(s.windows[0].cgsPhantomLatch)
+        XCTAssertTrue(effects.isEmpty)
+    }
+
     // MARK: - A. Un-phantoming drops the app's stale windowless placeholder (#5849)
 
     /// The captured bug: Slack's window is latched phantom, so its app also carries a windowless
@@ -68,7 +76,8 @@ final class WindowEventReducerPhantomTests: XCTestCase {
     func testUnphantomingEmitsRemoveWindowlessPlaceholder() {
         var s = state([slackWindow(latchedPhantom: true)])
         XCTAssertTrue(s.isPhantom(s.windows[0]), "precondition: latched and off screen")
-        let effects = WindowEventReducer.reduce(&s, .cgsWindowListsRead(visible: [], all: [Self.slackWid]))
+        let effects = WindowEventReducer.reduce(&s, .cgsWindowListsRead(
+            visible: [], all: [Self.slackWid], queried: [Self.slackWid]))
         XCTAssertTrue(s.isPhantom(s.windows[0]), "the CGS pass alone cannot clear an off-screen window")
         XCTAssertFalse(dropsPlaceholder(effects))
     }
@@ -103,7 +112,8 @@ final class WindowEventReducerPhantomTests: XCTestCase {
     /// is exactly when the placeholder is legitimate.
     func testBecomingPhantomDoesNotEmitRemoveWindowlessPlaceholder() {
         var s = state([slackWindow(latchedPhantom: false)])
-        let effects = WindowEventReducer.reduce(&s, .cgsWindowListsRead(visible: [], all: [Self.slackWid]))
+        let effects = WindowEventReducer.reduce(&s, .cgsWindowListsRead(
+            visible: [], all: [Self.slackWid], queried: [Self.slackWid]))
         XCTAssertTrue(s.isPhantom(s.windows[0]), "precondition: the weak signal must have flagged it")
         XCTAssertFalse(dropsPlaceholder(effects))
     }
@@ -112,7 +122,7 @@ final class WindowEventReducerPhantomTests: XCTestCase {
     func testNoFlipEmitsNothing() {
         var s = state([slackWindow(latchedPhantom: false, isOrderedIn: true)])
         let effects = WindowEventReducer.reduce(&s, .cgsWindowListsRead(
-            visible: [Self.slackWid], all: [Self.slackWid]))
+            visible: [Self.slackWid], all: [Self.slackWid], queried: [Self.slackWid]))
         XCTAssertFalse(dropsPlaceholder(effects))
     }
 
@@ -129,7 +139,8 @@ final class WindowEventReducerPhantomTests: XCTestCase {
     func testOnScreenWindowSurvivesTheOrderedOutSignal() {
         var s = state([slackWindow(latchedPhantom: false, lastFocusOrder: 0, isOrderedIn: true)],
                       appIsActive: true)
-        _ = WindowEventReducer.reduce(&s, .cgsWindowListsRead(visible: [], all: [Self.slackWid]))
+        _ = WindowEventReducer.reduce(&s, .cgsWindowListsRead(
+            visible: [], all: [Self.slackWid], queried: [Self.slackWid]))
         XCTAssertFalse(s.isPhantom(s.windows[0]))
     }
 
@@ -137,7 +148,8 @@ final class WindowEventReducerPhantomTests: XCTestCase {
     /// family, and it is a phantom whether or not its app happens to be frontmost.
     func testOrderedOutWindowIsFlaggedEvenWhenItsAppIsFrontmost() {
         var s = state([slackWindow(latchedPhantom: false, lastFocusOrder: 0)], appIsActive: true)
-        _ = WindowEventReducer.reduce(&s, .cgsWindowListsRead(visible: [], all: [Self.slackWid]))
+        _ = WindowEventReducer.reduce(&s, .cgsWindowListsRead(
+            visible: [], all: [Self.slackWid], queried: [Self.slackWid]))
         XCTAssertTrue(s.isPhantom(s.windows[0]))
     }
 
@@ -145,7 +157,8 @@ final class WindowEventReducerPhantomTests: XCTestCase {
     /// kept so the two halves of that former rule are both still pinned.
     func testOrderedOutWindowOfBackgroundAppIsFlagged() {
         var s = state([slackWindow(latchedPhantom: false, lastFocusOrder: 3)], appIsActive: false)
-        _ = WindowEventReducer.reduce(&s, .cgsWindowListsRead(visible: [], all: [Self.slackWid]))
+        _ = WindowEventReducer.reduce(&s, .cgsWindowListsRead(
+            visible: [], all: [Self.slackWid], queried: [Self.slackWid]))
         XCTAssertTrue(s.isPhantom(s.windows[0]))
     }
 
@@ -208,7 +221,8 @@ final class WindowEventReducerPhantomTests: XCTestCase {
     /// icon).
     func testLastWindowTurningPhantomEmitsAddWindowlessPlaceholder() {
         var s = state([slackWindow(latchedPhantom: false)])
-        let effects = WindowEventReducer.reduce(&s, .cgsWindowListsRead(visible: [], all: [Self.slackWid]))
+        let effects = WindowEventReducer.reduce(&s, .cgsWindowListsRead(
+            visible: [], all: [Self.slackWid], queried: [Self.slackWid]))
         XCTAssertTrue(s.isPhantom(s.windows[0]), "precondition: the weak signal must have flagged it")
         XCTAssertTrue(effects.contains(.addWindowlessPlaceholder(pid: Self.slackPid)))
     }
@@ -222,7 +236,7 @@ final class WindowEventReducerPhantomTests: XCTestCase {
         second.id = "wid-\(secondWid)"
         var s = state([slackWindow(latchedPhantom: false), second])
         let effects = WindowEventReducer.reduce(&s, .cgsWindowListsRead(
-            visible: [secondWid], all: [Self.slackWid, secondWid]))
+            visible: [secondWid], all: [Self.slackWid, secondWid], queried: [Self.slackWid, secondWid]))
         XCTAssertTrue(s.isPhantom(s.windows[0]), "precondition: only the first window flipped")
         XCTAssertFalse(s.isPhantom(s.windows[1]))
         XCTAssertFalse(effects.contains(.addWindowlessPlaceholder(pid: Self.slackPid)))
@@ -232,7 +246,7 @@ final class WindowEventReducerPhantomTests: XCTestCase {
     func testUnphantomingEmitsNoAdd() {
         var s = state([slackWindow(latchedPhantom: true, isOrderedIn: true)])
         let effects = WindowEventReducer.reduce(&s, .cgsWindowListsRead(
-            visible: [Self.slackWid], all: [Self.slackWid]))
+            visible: [Self.slackWid], all: [Self.slackWid], queried: [Self.slackWid]))
         XCTAssertFalse(effects.contains(.addWindowlessPlaceholder(pid: Self.slackPid)))
     }
 }

@@ -120,12 +120,12 @@ class AttentionEngine {
     /// attention only through this same accessibility channel — the tap is silent for it — and is debounced
     /// with everything else the app says.
     static func axSemanticFocus(pid: pid_t, wid: CGWindowID) {
+        guard let offer = driver.offerSemantic(pid: pid, wid: wid, context: context()) else { return }
         let settle = AttentionSettlePolicy.settle(recentInputAge: recentInputAge())
-        let armed = settlePolicy.offer(pid: pid, wid: wid, now: ProcessInfo.processInfo.systemUptime,
-                                       settle: settle)
+        let armed = settlePolicy.offer(offer, now: ProcessInfo.processInfo.systemUptime, settle: settle)
         DispatchQueue.main.asyncAfter(deadline: .now() + settle) {
-            guard let target = settlePolicy.fire(pid: pid, armedAt: armed.armedAt) else { return }
-            applySemanticFocus(pid: pid, wid: target)
+            guard let target = settlePolicy.fire(pid: pid, token: armed.token) else { return }
+            applySemanticFocus(target)
         }
     }
 
@@ -138,16 +138,18 @@ class AttentionEngine {
     /// Which answer survives a run is `AttentionSettlePolicy`'s (a pure triad); the timer is this file's.
     private static var settlePolicy = AttentionSettlePolicy()
 
-    private static func applySemanticFocus(pid: pid_t, wid: CGWindowID) {
+    private static func applySemanticFocus(_ offer: SemanticAttentionOffer) {
+        let pid = offer.process.pid
+        let wid = offer.wid
         let representativeWid = WindowSurfaceInventory.representativeWid(wid)
         guard Windows.byWindowId[representativeWid] != nil else {
             return withRepresentedWindow(wid, pid: pid,
-                success: { applySemanticFocus(pid: pid, wid: wid) }) {
+                success: { applySemanticFocus(offer) }) {
                     TrackingTelemetryRecorder.attentionRefused(pid: pid, wid: wid,
                         source: .accessibility, reason: "unrepresented")
                 }
         }
-        let outcome = driver.decideSemantic(pid: pid, wid: wid, context: context())
+        let outcome = driver.decideSemantic(offer, context: context())
         // Only a COMMITTED result is attention. Writing the refused ones as attention too would leave
         // `lastAttention` reporting a window the rules had just declined, which is the opposite of what a
         // reader of that field is asking.

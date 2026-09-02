@@ -84,6 +84,12 @@ struct TrackedWindow: Equatable {
     /// nil-titles policy exists because that transient must not be read as "no longer tabbed". Cleared only
     /// by a positive signal, when a read RETURNS titles saying otherwise. See `TabWindow.tabCount`.
     var tabCount = 0
+    /// The last completed AX tab-bar read. `unknown` means no answer was obtained and must never be folded
+    /// into `standalone`; the latter is an actual successful read which found no AXTabGroup.
+    var tabGroupObservation = TabGroupObservation.unknown
+    /// The last direct Space-membership answer. The displayed `spaceIds` may still be a borrowed tab Space,
+    /// so this preserves whether CGS actually answered independently of the derived presentation value.
+    var spaceMembershipObservation = SpaceMembershipObservation.unavailable
     /// **The MRU truth**: the uptime at which the OS last told us this window came forward (the event's own
     /// `now`, never a time we invent). 0 = never seen focused, which sorts behind every window that was.
     /// Stored rather than derived because it is the one thing that survives a LATE report: a window
@@ -98,6 +104,40 @@ struct TrackedWindow: Equatable {
     /// whether a thumbnail exists (the reducer decides thumbnail BORROWING between siblings; the pixels stay
     /// in the shell — `ReducerEffect.copyThumbnail`)
     var hasThumbnail = false
+    var lifecycle = WindowLifecycleState.alive
+}
+
+enum WindowLifecycleState: Equatable {
+    case unverified
+    case alive
+    case axElementEnded
+    case replacementPending
+    case surfaceEnded
+    case confirmedClosed
+}
+
+enum AxElementEndAvailability: Equatable {
+    case foundReplacement
+    case absent
+    case noAnswer
+}
+
+enum AxElementEndVerdict: Equatable {
+    case replacementFound
+    case inconclusive
+    case confirmedClosed
+}
+
+enum AxElementEndPolicy {
+    static func decide(ax: AxElementEndAvailability, surfacePresent: Bool, isTabbed: Bool,
+                       groupShrank: Bool, axQueryCoversWindow: Bool) -> AxElementEndVerdict {
+        if ax == .foundReplacement { return .replacementFound }
+        if !surfacePresent { return .confirmedClosed }
+        if ax == .noAnswer { return .inconclusive }
+        if isTabbed { return groupShrank ? .confirmedClosed : .inconclusive }
+        if !axQueryCoversWindow { return .inconclusive }
+        return .confirmedClosed
+    }
 }
 
 /// The per-app facts the orchestration reads: the kernel-facing `ApplicationState` plus `isActive`
@@ -121,6 +161,34 @@ struct TrackedApp: Equatable {
 /// limits that come with it). `UInt64` rather than `AXUIElementID` because this layer is pure and the AX
 /// typealias lives in the app target only; the two are the same width and the shell passes one straight in.
 typealias TabGroupToken = UInt64
+
+enum TabGroupObservation: Equatable {
+    case unknown
+    case standalone
+    case group(titles: [String], token: TabGroupToken?)
+
+    var titles: [String]? {
+        guard case .group(let titles, _) = self else { return nil }
+        return titles
+    }
+
+    var token: TabGroupToken? {
+        guard case .group(_, let token) = self else { return nil }
+        return token
+    }
+
+    var wasRead: Bool { self != .unknown }
+}
+
+enum SpaceMembershipObservation: Equatable {
+    case unavailable
+    case known([UInt64])
+
+    var spaceIds: [UInt64]? {
+        guard case .known(let ids) = self else { return nil }
+        return ids
+    }
+}
 
 struct TabGroupsTable: Equatable {
     private(set) var membersByGroup = [Int: [CGWindowID]]()
@@ -623,6 +691,7 @@ struct TrackedWindowState: Equatable {
         let before = windows[i].spaceIds
         let wasEmpty = before.isEmpty
         let wasPhantom = isPhantom(windows[i])
+        windows[i].spaceMembershipObservation = .known(queried)
         var ids = queried
         var borrowed = false
         // inactive tabs return no space from CGSCopySpacesForWindows; use the active tab sibling's space
@@ -667,6 +736,7 @@ struct TrackedWindowState: Equatable {
             ids.remove(at: j)
         }
         windows[i].spaceIds = ids
+        windows[i].spaceMembershipObservation = .known(ids)
         windows[i].spaceIndexes = ids.compactMap { spaceIndexById[$0] }
         windows[i].isOnAllSpaces = ids.count > 1
         windows[i].spaceIsBorrowed = false  // a 1325/1326 delta is genuine CGS evidence
@@ -756,25 +826,22 @@ enum ReducerInput: Equatable {
     /// titles were read out of. Carried as one input rather than two so a replayed decision sees the read
     /// exactly as the live one did.
     case discoveryLanded(wid: CGWindowID, accepted: Bool, newlyTracked: Bool,
-                         adoptedAsInactiveTab: Bool, queriedSpaceIds: [UInt64], isOrderedIn: Bool,
-                         tabTitles: [String]?, tabGroupToken: TabGroupToken?)
+                         adoptedAsInactiveTab: Bool, spaceMembership: SpaceMembershipObservation,
+                         isOrderedIn: Bool, tabGroup: TabGroupObservation)
     /// The apply-side of `Applications.refreshWindowTitleAndTabs` (title/main already applied by the shell;
     /// `changedSoFar` = whether they changed): the reducer owns the tab reconcile. Carries NO minimized
     /// fact — that comes from the WindowServer query now (`WsWindowState.minimizedTag`).
-    case titleAndTabsRead(wid: CGWindowID, tabTitles: [String]?, tabGroupToken: TabGroupToken?,
+    case titleAndTabsRead(wid: CGWindowID, tabGroup: TabGroupObservation,
                           reconcileTabs: Bool, changedSoFar: Bool)
     /// A batched WS state query landed (`Applications.updateWindowStatesViaWindowServer`).
     case windowServerStateRead([WsWindowSnapshot])
     /// The off-main Spaces re-query landed (`Applications.syncSpacesState`): the authoritative per-window
     /// Space map, the wids it actually ASKED about, plus whether the topology snapshot changed anything.
     ///
-    /// `queried` is what makes an absent wid readable. The map is built off-main from the tracked list as it
-    /// stood when the pass STARTED, and applied when it lands, so "absent" conflates two opposite facts: CGS
-    /// answered "no Space" for a wid we asked about (evidence — the strong phantom signal, and what retires a
-    /// group's dead members), and a wid that entered the model mid-flight and was never asked about at all
-    /// (silence). Applying the second as the first wiped the Space a brand-new window's own discovery had
-    /// just queried, hiding it until the next pass. Only `queried` wids are applied; the rest keep what they
-    /// have.
+    /// `queried` is the issue-time scope; `answered` distinguishes a completed empty answer from a failed
+    /// query. A wid outside the scope, or inside it without an answer, is silence and keeps its last fact. A
+    /// positive all-Space enumeration may still place a window that entered the model mid-flight because it
+    /// is an explicit answer rather than an inference from absence.
     ///
     /// `placedByWindowServer` names the wids the pass could not place but the WindowServer says ARE on a
     /// Space — a contradiction between two OS reads, and the one case where an empty answer is not evidence.
@@ -784,6 +851,7 @@ enum ReducerInput: Equatable {
     /// (hidden with no recovery path, #5954) and inventing a Space for it (a fabricated fact other rules read
     /// as truth). Empty for every window in the ordinary case.
     case spacesSynced(windowToSpaces: [CGWindowID: [UInt64]], queried: Set<CGWindowID>,
+                      answered: Set<CGWindowID>,
                       placedByWindowServer: Set<CGWindowID>, topologyChanged: Bool)
     /// An AX `kAXFocusedWindow` read landed. `viaActivationRead` means the attention model requested the
     /// bounded read for a factless activation; false means the per-app discovery seed (`Window.checkIfFocused`).
@@ -800,9 +868,13 @@ enum ReducerInput: Equatable {
     /// The AX probes after an order-out agreed the window is gone: dead cached element AND the app no longer
     /// lists the wid (`Applications.removeIfClosedAfterOrderOut`).
     case livenessConfirmedDead(wid: CGWindowID)
+    /// The app invalidated a window's AX node. This begins reconciliation; the node alone is not a close.
+    case axElementEnded(wid: CGWindowID)
+    /// Independent AX-list and WindowServer evidence joined after `axElementEnded`.
+    case axElementReconciled(wid: CGWindowID, verdict: AxElementEndVerdict)
     /// The two CGS window lists the rescan fetched (visible excludes the `.invisible1/.invisible2` tags,
     /// all includes them) — the phantom-detection pass (`Applications.applyPhantomVerdict`).
-    case cgsWindowListsRead(visible: Set<CGWindowID>, all: Set<CGWindowID>)
+    case cgsWindowListsRead(visible: Set<CGWindowID>, all: Set<CGWindowID>, queried: Set<CGWindowID>)
     /// Screen stacking, top-most first, from the blocking CGS query the very first summon fires off-main
     /// (`Windows.sortByLevel`). The order to fall back on for windows AltTab has never seen focused.
     case zOrderRead(widsTopFirst: [CGWindowID])
@@ -820,6 +892,26 @@ enum ReducerInput: Equatable {
     // timer checks firing
     case holdReleaseCheck(wid: CGWindowID, attempt: Int)                                     // `checkHoldRelease`
     case dragOutCheck(wid: CGWindowID, previousRepWid: CGWindowID, attempt: Int)             // `checkDragOut`
+}
+
+extension ReducerInput {
+    /// Fixture compatibility for recordings written before unknown and an explicit negative were distinct.
+    /// Their Space arrays were completed answers; nil tab payloads were intentionally non-evidence.
+    static func discoveryLanded(wid: CGWindowID, accepted: Bool, newlyTracked: Bool,
+                                adoptedAsInactiveTab: Bool, queriedSpaceIds: [UInt64], isOrderedIn: Bool,
+                                tabTitles: [String]?, tabGroupToken: TabGroupToken?) -> Self {
+        let tabs = tabTitles.map { TabGroupObservation.group(titles: $0, token: tabGroupToken) } ?? .unknown
+        return .discoveryLanded(wid: wid, accepted: accepted, newlyTracked: newlyTracked,
+            adoptedAsInactiveTab: adoptedAsInactiveTab, spaceMembership: .known(queriedSpaceIds),
+            isOrderedIn: isOrderedIn, tabGroup: tabs)
+    }
+
+    static func titleAndTabsRead(wid: CGWindowID, tabTitles: [String]?, tabGroupToken: TabGroupToken?,
+                                 reconcileTabs: Bool, changedSoFar: Bool) -> Self {
+        let tabs = tabTitles.map { TabGroupObservation.group(titles: $0, token: tabGroupToken) } ?? .unknown
+        return .titleAndTabsRead(wid: wid, tabGroup: tabs, reconcileTabs: reconcileTabs,
+            changedSoFar: changedSoFar)
+    }
 }
 
 /// A request the reducer makes of the shell — every side effect the orchestration used to fire inline.
@@ -852,6 +944,10 @@ enum ReducerEffect: Equatable {
     case refreshUiImmediately(wids: [CGWindowID])
     /// remove the window from the live model (`Windows.removeWindows`, view/scheduler/subscription cleanup)
     case removeWindow(CGWindowID)
+    case reconcileAxElementEnd(CGWindowID)
+    /// Preserve a short semantic shell before a WindowServer surface is removed. It may be transferred only
+    /// to a new wid whose AX element is explicitly equal.
+    case retireSurface(CGWindowID)
     /// copy a sibling's thumbnail onto a freshly-active representative (the app-icon-gap placeholder)
     case copyThumbnail(from: CGWindowID, to: CGWindowID)
     /// hold every capture of this window until its restore animation is over, then take one

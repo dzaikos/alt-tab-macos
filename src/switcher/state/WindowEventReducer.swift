@@ -69,7 +69,9 @@ enum WindowEventReducer {
             // strand its entry forever. Nothing else drains it — this is the rec13 leak shape, drained here.
             state.carried.pendingGroupInheritance.removeValue(forKey: wid)
             if state.window(wid) != nil {
-                return [.log(state.removalLog(wid, reason: "wsDestroyed")), .removeWindow(wid)]
+                if let i = state.windowIndex(wid) { state.windows[i].lifecycle = .surfaceEnded }
+                return [.log(state.removalLog(wid, reason: "wsDestroyed")),
+                        .retireSurface(wid), .removeWindow(wid)]
                     + refrontAfterFocusedWindowBecomesUnavailable(&state, wid: wid)
             }
             return []
@@ -127,13 +129,13 @@ enum WindowEventReducer {
             return spaceChangeSettled(&state)
         case .appActivated(let pid, _, _):
             return appActivated(&state, pid: pid)
-        case .discoveryLanded(let wid, let accepted, let newlyTracked, let adoptedAsInactiveTab, let queriedSpaceIds,
-                              let isOrderedIn, let tabTitles, let tabGroupToken):
+        case .discoveryLanded(let wid, let accepted, let newlyTracked, let adoptedAsInactiveTab,
+                              let spaceMembership, let isOrderedIn, let tabGroup):
             return discoveryLanded(&state, wid: wid, accepted: accepted, newlyTracked: newlyTracked,
-                adoptedAsInactiveTab: adoptedAsInactiveTab, queriedSpaceIds: queriedSpaceIds,
-                isOrderedIn: isOrderedIn, tabTitles: tabTitles, tabGroupToken: tabGroupToken)
-        case .titleAndTabsRead(let wid, let tabTitles, let tabGroupToken, let reconcileTabs, let changedSoFar):
-            return titleAndTabsRead(&state, wid: wid, tabTitles: tabTitles, tabGroupToken: tabGroupToken,
+                adoptedAsInactiveTab: adoptedAsInactiveTab, spaceMembership: spaceMembership,
+                isOrderedIn: isOrderedIn, tabGroup: tabGroup)
+        case .titleAndTabsRead(let wid, let tabGroup, let reconcileTabs, let changedSoFar):
+            return titleAndTabsRead(&state, wid: wid, tabGroup: tabGroup,
                 reconcileTabs: reconcileTabs, changedSoFar: changedSoFar)
         case .axFocusedWindowRead:
             return []
@@ -148,19 +150,37 @@ enum WindowEventReducer {
             return []
         case .windowServerStateRead(let snapshots):
             return windowServerStateRead(&state, snapshots)
-        case .spacesSynced(let windowToSpaces, let queried, let placedByWindowServer, let topologyChanged):
+        case .spacesSynced(let windowToSpaces, let queried, let answered, let placedByWindowServer, let topologyChanged):
             return spacesSynced(&state, windowToSpaces: windowToSpaces, queried: queried,
-                placedByWindowServer: placedByWindowServer, topologyChanged: topologyChanged)
+                answered: answered, placedByWindowServer: placedByWindowServer, topologyChanged: topologyChanged)
         case .livenessConfirmedDead(let wid):
             // A CLOSE the OS confirmed twice: the cached element died AND the app no longer lists the wid
             // among its windows (`removeIfClosedAfterOrderOut`, which keeps the window on a stale-ref-only
             // verdict). Logged with its reason so a capture says WHICH path condemned it.
-            return state.window(wid) != nil
-                ? [.log(state.removalLog(wid, reason: "axElementDead")), .removeWindow(wid)]
+            guard let i = state.windowIndex(wid) else { return [] }
+            state.windows[i].lifecycle = .confirmedClosed
+            return [.log(state.removalLog(wid, reason: "axElementDead")), .removeWindow(wid)]
+                + refrontAfterFocusedWindowBecomesUnavailable(&state, wid: wid)
+        case .axElementEnded(let wid):
+            guard let i = state.windowIndex(wid) else { return [] }
+            state.windows[i].lifecycle = .axElementEnded
+            return [.log("lifecycle #\(wid) axElementEnded"), .reconcileAxElementEnd(wid)]
+        case .axElementReconciled(let wid, let verdict):
+            guard let i = state.windowIndex(wid) else { return [] }
+            switch verdict {
+            case .replacementFound:
+                state.windows[i].lifecycle = .alive
+                return [.log("lifecycle #\(wid) replacementFound")]
+            case .inconclusive:
+                state.windows[i].lifecycle = .replacementPending
+                return [.log("lifecycle #\(wid) replacementPending")]
+            case .confirmedClosed:
+                state.windows[i].lifecycle = .confirmedClosed
+                return [.log(state.removalLog(wid, reason: "axDestroyReconciled")), .removeWindow(wid)]
                     + refrontAfterFocusedWindowBecomesUnavailable(&state, wid: wid)
-                : []
-        case .cgsWindowListsRead(let visible, let all):
-            return cgsWindowListsRead(&state, visible: visible, all: all)
+            }
+        case .cgsWindowListsRead(let visible, let all, let queried):
+            return cgsWindowListsRead(&state, visible: visible, all: all, queried: queried)
         case .zOrderRead(let widsTopFirst):
             let changed = state.seedFocusOrderFromZOrder(widsTopFirst)
             guard !changed.isEmpty else { return [] }
@@ -795,8 +815,11 @@ enum WindowEventReducer {
     /// update with the newly-CREATED gate, the reconcile, the adopted-tab convergence, the re-render.
     private static func discoveryLanded(_ state: inout TrackedWindowState, wid: CGWindowID, accepted: Bool,
                                         newlyTracked: Bool, adoptedAsInactiveTab: Bool,
-                                        queriedSpaceIds: [UInt64], isOrderedIn: Bool,
-                                        tabTitles: [String]?, tabGroupToken: TabGroupToken?) -> [ReducerEffect] {
+                                        spaceMembership: SpaceMembershipObservation, isOrderedIn: Bool,
+                                        tabGroup: TabGroupObservation) -> [ReducerEffect] {
+        let queriedSpaceIds = spaceMembership.spaceIds
+        let tabTitles = tabGroup.titles
+        let tabGroupToken = tabGroup.token
         // A not-yet-admitted wid the OS has just CREATED is not a dead wid. A custom AXWindow root can be
         // published without enough geometry or semantics to admit it, then become admissible on its first
         // move/resize. Everything below CONSUMES this wid's pending state, so a latent landing must not spend
@@ -822,7 +845,8 @@ enum WindowEventReducer {
         state.carried.untrackedJoinedSpace.removeValue(forKey: wid)
         let removedFromSpaceWhileUntracked = state.pendingSpaceRemoval.removeValue(forKey: wid)
         let wasRemovedFromSpaceWhileUntracked = removedFromSpaceWhileUntracked.map { left in
-            queriedSpaceIds.isEmpty || queriedSpaceIds == [left]
+            guard let queriedSpaceIds else { return false }
+            return queriedSpaceIds.isEmpty || queriedSpaceIds == [left]
         } ?? false
         // ...and the same self-draining logic for the two maps the HANDOVER fills. A wid admission currently
         // rejects is not becoming a destination, and `accepted: false` is the only moment we learn that for
@@ -840,7 +864,7 @@ enum WindowEventReducer {
             state.carried.pendingGroupInheritance.removeValue(forKey: wid)
         }
         guard accepted, let window = state.window(wid) else { return [] }
-        recordTabCount(&state, wid: wid, tabTitles: tabTitles)
+        recordTabObservation(&state, wid: wid, observation: tabGroup)
         var effects = [ReducerEffect]()
         // "Newly TRACKED" (`newlyTracked`) is not "newly CREATED": at launch every window is newly tracked.
         // Only a WindowServer create event means the user just made this window. Read BEFORE the promotion
@@ -912,6 +936,7 @@ enum WindowEventReducer {
             // background, like its Space below.
             if let i = state.windowIndex(wid) {
                 state.windows[i].isOrderedIn = isOrderedIn && !adoptedAsInactiveTab
+                state.windows[i].spaceMembershipObservation = spaceMembership
             }
             // Override Window.init's current-Space default with the real Space resolved off-main (new
             // windows only; existing ones stay live via events / spacesSynced).
@@ -923,7 +948,7 @@ enum WindowEventReducer {
                 let r = state.applyWindowSpaces(wid, spaceIds: [])
                 effects.append(.updateScreenId(wid))
                 if r.unphantomedRealWindow { effects.append(.removeWindowlessPlaceholder(pid: window.pid)) }
-            } else if !queriedSpaceIds.isEmpty {
+            } else if let queriedSpaceIds, !queriedSpaceIds.isEmpty || !isOrderedIn {
                 let r = state.applyWindowSpaces(wid, spaceIds: queriedSpaceIds)
                 effects.append(.updateScreenId(wid))
                 if r.unphantomedRealWindow { effects.append(.removeWindowlessPlaceholder(pid: window.pid)) }
@@ -1067,8 +1092,8 @@ enum WindowEventReducer {
     /// The apply-side of `Applications.refreshWindowTitleAndTabs` (the shell already wrote title/main and
     /// reports whether they changed): the tab reconcile and the re-render decision. Minimized is NOT here —
     /// it comes from the WindowServer query, which cannot be blocked by the window's own app.
-    private static func titleAndTabsRead(_ state: inout TrackedWindowState, wid: CGWindowID, tabTitles: [String]?,
-                                         tabGroupToken: TabGroupToken?, reconcileTabs: Bool,
+    private static func titleAndTabsRead(_ state: inout TrackedWindowState, wid: CGWindowID,
+                                         tabGroup: TabGroupObservation, reconcileTabs: Bool,
                                          changedSoFar: Bool) -> [ReducerEffect] {
         guard state.window(wid) != nil else { return [] }
         var effects = [ReducerEffect]()
@@ -1076,7 +1101,9 @@ enum WindowEventReducer {
         // only when the caller actually read tabs — an order-out skips the kAXChildren read, so its nil says
         // nothing about the window's tab group
         var tabCountMoved = false
-        if reconcileTabs { tabCountMoved = recordTabCount(&state, wid: wid, tabTitles: tabTitles) }
+        if reconcileTabs { tabCountMoved = recordTabObservation(&state, wid: wid, observation: tabGroup) }
+        let tabTitles = tabGroup.titles
+        let tabGroupToken = tabGroup.token
         if reconcileTabs, tabTitles != nil || state.groups.siblingWids(of: wid) != nil {
             let r = updateTabState(&state, activeWid: wid, siblingTitles: tabTitles, tabGroupToken: tabGroupToken)
             effects.append(contentsOf: r.effects)
@@ -1184,13 +1211,12 @@ enum WindowEventReducer {
     }
 
     /// The off-main Spaces re-query landed (the apply-side of `Applications.syncSpacesState`): backfill the
-    /// Space membership of every window the query ASKED about, then regroup if anything moved.
+    /// Space membership from every completed scoped answer, then regroup if anything moved.
     ///
-    /// Windows outside `queried` are skipped, and that is the whole point of the parameter: they entered the
-    /// model after the pass captured its wid list, so this answer says nothing about them (see the input's
-    /// doc). Applying `[]` to them anyway asserted "CGS places this window nowhere" about a window nobody had
-    /// asked about — the strong phantom signal — so a window discovered during the off-main query was hidden
-    /// despite its own discovery having just read its Space correctly.
+    /// Windows outside `queried` are skipped unless the all-Space enumeration positively names them. A wid
+    /// inside `queried` but outside `answered` is skipped too: the direct query failed, which is not the same
+    /// fact as a completed `[]`. Flattening either silence into empty asserted the strong phantom signal about
+    /// a window for which CGS had supplied no answer.
     ///
     /// UNLESS the map places it anyway, in which case we hold an answer and it would be daft to drop it. The
     /// map is NOT built from `queried`: `Spaces.query` enumerates every Space and takes whatever windows CGS
@@ -1199,23 +1225,29 @@ enum WindowEventReducer {
     /// window on `Window.init`'s current-Space GUESS, which is wrong the moment the window is on another
     /// Space. Only SILENCE is ambiguous; an answer is an answer whoever it was asked for.
     private static func spacesSynced(_ state: inout TrackedWindowState, windowToSpaces: [CGWindowID: [UInt64]],
-                                     queried: Set<CGWindowID>, placedByWindowServer: Set<CGWindowID>,
+                                     queried: Set<CGWindowID>, answered: Set<CGWindowID>,
+                                     placedByWindowServer: Set<CGWindowID>,
                                      topologyChanged: Bool) -> [ReducerEffect] {
         var effects = [ReducerEffect]()
         var changed = topologyChanged
         for w in state.windows {
-            guard let wid = w.wid, queried.contains(wid) || windowToSpaces[wid] != nil else { continue }
+            guard let wid = w.wid else { continue }
+            let ids = windowToSpaces[wid]
+            let scopedAnswer = queried.contains(wid) && answered.contains(wid)
+            let positiveEnumeration = ids?.isEmpty == false
+            guard scopedAnswer || positiveEnumeration else { continue }
             // Two OS reads disagree: CGS named no Space for this wid, the WindowServer says it is on one.
             // An empty CGS answer is also what a wid it has never heard of returns, so on its own it cannot
             // carry the weight the strong phantom signal puts on it. Keep the last membership CGS itself
             // reported — stale at worst, and the window stays reachable instead of disappearing with no way
             // back (#5954). The wids the WindowServer does NOT know fall through and are wiped as before;
             // those are the corpses, and `discardDeadPhantomWindows` removes them outright.
-            if windowToSpaces[wid] == nil, placedByWindowServer.contains(wid) {
+            if ids?.isEmpty == true, placedByWindowServer.contains(wid) {
                 effects.append(.log("spacesSync keepPlaced #\(wid) sp\(w.spaceIds) (WindowServer places it, CGS named none)"))
                 continue
             }
-            let r = state.applyWindowSpaces(wid, spaceIds: windowToSpaces[wid] ?? [])
+            guard let ids else { continue }
+            let r = state.applyWindowSpaces(wid, spaceIds: ids)
             effects.append(.updateScreenId(wid))
             if r.unphantomedRealWindow { effects.append(.removeWindowlessPlaceholder(pid: w.pid)) }
             if r.changed { changed = true }
@@ -1230,11 +1262,12 @@ enum WindowEventReducer {
     /// per window via the kernel, latched; re-render only windows whose DERIVED phantom actually flipped
     /// (a verdict absorbed by the hold / group-member exemptions doesn't re-render anything).
     private static func cgsWindowListsRead(_ state: inout TrackedWindowState, visible: Set<CGWindowID>,
-                                           all: Set<CGWindowID>) -> [ReducerEffect] {
+                                           all: Set<CGWindowID>, queried: Set<CGWindowID>) -> [ReducerEffect] {
         var effects = [ReducerEffect]()
         var changed = [CGWindowID]()
         for i in state.windows.indices {
-            guard let wid = state.windows[i].wid, wid != CGWindowID(bitPattern: -1) else { continue }
+            guard let wid = state.windows[i].wid, wid != CGWindowID(bitPattern: -1),
+                  queried.contains(wid) || all.contains(wid) else { continue }
             // No focus exemption any more. It existed because CGS keeps a reopened Electron window tagged
             // invisible for seconds after it is on screen and focused (#5849), and the weak signal read that
             // tag; the ordered-in bit says the window is on screen, so the case resolves on a fact instead
@@ -1557,12 +1590,14 @@ enum WindowEventReducer {
     /// that can open its tab-count confirmation (`TabGroupResolver.tabCountAccountsForEveryMember`). The caller
     /// must reconcile on it: see the call site for the merge that formed no group because of the 11ms gap.
     @discardableResult
-    private static func recordTabCount(_ state: inout TrackedWindowState, wid: CGWindowID, tabTitles: [String]?) -> Bool {
+    private static func recordTabObservation(_ state: inout TrackedWindowState, wid: CGWindowID,
+                                             observation: TabGroupObservation) -> Bool {
         guard let i = state.windowIndex(wid) else { return false }
         let before = state.windows[i].tabCount
-        if let titles = tabTitles, titles.count > 1 {
+        if observation != .unknown { state.windows[i].tabGroupObservation = observation }
+        if let titles = observation.titles, titles.count > 1 {
             state.windows[i].tabCount = titles.count
-        } else if tabTitles == nil, state.groups.groupId(of: wid) == nil {
+        } else if observation == .standalone, state.groups.groupId(of: wid) == nil {
             state.windows[i].tabCount = 0
         }
         return state.windows[i].tabCount != before

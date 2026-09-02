@@ -12,8 +12,9 @@ struct ProcessGeneration: Hashable, Comparable {
     }
 }
 
-/// A window, qualified by the process generation that owns it. A wid alone is not an identity: the
-/// WindowServer reuses those too.
+/// A WindowServer window number bound to the process generation AltTab observed owning it. Window numbers
+/// are session-unique on macOS; qualifying ownership prevents a stale per-process callback from being
+/// attributed to a different process while keeping the WindowServer number as the surface identity.
 struct WindowIdentity: Hashable, Comparable {
     let process: ProcessGeneration
     let wid: UInt32
@@ -36,6 +37,19 @@ struct IngressSequence: RawRepresentable, Hashable, Comparable {
 struct MonotonicTimestamp: RawRepresentable, Hashable, Comparable {
     let rawValue: UInt64
     static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+}
+
+/// Issue-order fence for asynchronous snapshots. Only the newest issued query may replace aggregate state;
+/// a response does not become newer merely by reaching the apply queue last.
+struct QueryIssueOrder: Equatable {
+    private(set) var latest: UInt64 = 0
+
+    mutating func issue() -> UInt64 {
+        latest &+= 1
+        return latest
+    }
+
+    func accepts(_ sequence: UInt64) -> Bool { sequence == latest }
 }
 
 /// Who told us something. Telemetry only: a disagreement has to be attributable to a channel rather than to

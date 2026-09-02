@@ -85,8 +85,10 @@ wedged app likewise names only its process; the model preserves its last confirm
 
 `AttentionSettlePolicy.settle` (60ms) collapses an app's burst of answers to its last one — an app raising
 all its windows answers once per window, each answer true, and the run ends where it started (#5974). It is
-the only arbitration delay in the attention path. Widening it is not free: it delays every genuine
-switch by the same amount, against a measured floor of 219ms for the fastest human action ever captured.
+the only arbitration delay in the attention path. The AX answer's process generation and ingress sequence
+are captured before that delay; the timer changes commit time, never evidence order. Thus an exact click
+arriving while AX settles remains newer when the timer fires. Widening the settle is not free: it delays
+every genuine switch by the same amount, against a measured floor of 219ms for the fastest human action ever captured.
 Raises spaced wider than the settle commit separately and #5974's shape returns; QA watches that limit
 in amber rather than asserting it away.
 

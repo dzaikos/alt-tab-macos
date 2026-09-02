@@ -84,7 +84,7 @@ final class WindowEventReducerSpaceTests: XCTestCase {
     func testAnAnswerDoesNotWipeAWindowItNeverAskedAbout() {
         var s = state()
         _ = WindowEventReducer.reduce(&s, .spacesSynced(windowToSpaces: [Self.widA: [1]],
-            queried: [Self.widA], placedByWindowServer: [], topologyChanged: false))
+            queried: [Self.widA], answered: [Self.widA], placedByWindowServer: [], topologyChanged: false))
         XCTAssertEqual(s.window(Self.widB)?.spaceIds, [2], "widB was never queried, so nothing was learnt")
         XCTAssertFalse(s.isPhantom(s.windows[1]))
     }
@@ -96,17 +96,28 @@ final class WindowEventReducerSpaceTests: XCTestCase {
     func testAnAnswerIsAppliedEvenToAWindowItNeverAskedAbout() {
         var s = state()
         _ = WindowEventReducer.reduce(&s, .spacesSynced(windowToSpaces: [Self.widB: [1]],
-            queried: [Self.widA], placedByWindowServer: [], topologyChanged: false))
+            queried: [Self.widA], answered: [Self.widA, Self.widB],
+            placedByWindowServer: [], topologyChanged: false))
         XCTAssertEqual(s.window(Self.widB)?.spaceIds, [1])
     }
 
     /// The other half, which must keep working: a wid the pass DID ask about, the map does not place, and the
     /// WindowServer does not place either. THAT is CGS answering "no Space", and it is what retires a group's
     /// dead members and hands a closed window to the sweep, so neither skip above may swallow it.
-    func testAQueriedWindowWithNoAnswerIsStillWiped() {
+    func testAQueriedWindowWhoseDirectQueryFailedKeepsItsLastMembership() {
         var s = state()
         _ = WindowEventReducer.reduce(&s, .spacesSynced(windowToSpaces: [Self.widA: [1]],
-            queried: [Self.widA, Self.widB], placedByWindowServer: [], topologyChanged: false))
+            queried: [Self.widA, Self.widB], answered: [Self.widA],
+            placedByWindowServer: [], topologyChanged: false))
+        XCTAssertEqual(s.window(Self.widB)?.spaceIds, [2])
+        XCTAssertFalse(s.isPhantom(s.windows[1]))
+    }
+
+    func testAnExplicitEmptyAnswerWipesAQueriedWindow() {
+        var s = state()
+        _ = WindowEventReducer.reduce(&s, .spacesSynced(
+            windowToSpaces: [Self.widA: [1], Self.widB: []], queried: [Self.widA, Self.widB],
+            answered: [Self.widA, Self.widB], placedByWindowServer: [], topologyChanged: false))
         XCTAssertEqual(s.window(Self.widB)?.spaceIds, [])
         XCTAssertTrue(s.isPhantom(s.windows[1]))
     }
@@ -120,8 +131,9 @@ final class WindowEventReducerSpaceTests: XCTestCase {
     /// the last membership CGS itself reported instead of being wiped and hidden with no way back.
     func testAContradictedEmptyKeepsTheLastKnownMembership() {
         var s = state()
-        _ = WindowEventReducer.reduce(&s, .spacesSynced(windowToSpaces: [Self.widA: [1]],
-            queried: [Self.widA, Self.widB], placedByWindowServer: [Self.widB], topologyChanged: false))
+        _ = WindowEventReducer.reduce(&s, .spacesSynced(
+            windowToSpaces: [Self.widA: [1], Self.widB: []], queried: [Self.widA, Self.widB],
+            answered: [Self.widA, Self.widB], placedByWindowServer: [Self.widB], topologyChanged: false))
         XCTAssertEqual(s.window(Self.widB)?.spaceIds, [2], "the last CGS-reported membership, not a guess")
         XCTAssertFalse(s.isPhantom(s.windows[1]))
     }
@@ -131,7 +143,8 @@ final class WindowEventReducerSpaceTests: XCTestCase {
     func testAPlacedWindowStillTakesItsNewSpace() {
         var s = state()
         _ = WindowEventReducer.reduce(&s, .spacesSynced(windowToSpaces: [Self.widA: [1], Self.widB: [1]],
-            queried: [Self.widA, Self.widB], placedByWindowServer: [Self.widB], topologyChanged: false))
+            queried: [Self.widA, Self.widB], answered: [Self.widA, Self.widB],
+            placedByWindowServer: [Self.widB], topologyChanged: false))
         XCTAssertEqual(s.window(Self.widB)?.spaceIds, [1])
     }
 

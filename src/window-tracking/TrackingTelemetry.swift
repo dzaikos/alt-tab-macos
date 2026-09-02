@@ -288,6 +288,8 @@ extension AxNotificationCapability {
         case .mainWindowChanged: return "mainWindow"
         case .titleChanged: return "titleChanged"
         case .focusedTabChanged: return "focusedTab"
+        case .windowCreated: return "windowCreated"
+        case .elementDestroyed: return "elementDestroyed"
         }
     }
 }

@@ -37,7 +37,7 @@ final class AttentionDriverTests: XCTestCase {
     func testSpaceAndDiscoveryInputsNameNothing() {
         var driver = AttentionDriver()
         let outcome = driver.decide(.spacesSynced(windowToSpaces: [:], queried: [],
-            placedByWindowServer: [], topologyChanged: false), context: context())
+            answered: [], placedByWindowServer: [], topologyChanged: false), context: context())
         XCTAssertEqual(outcome.reason, "noInput")
     }
 
@@ -72,6 +72,18 @@ final class AttentionDriverTests: XCTestCase {
             context: context())
         XCTAssertEqual(outcome.wid, 2)
         XCTAssertEqual(outcome.reason, "front")
+    }
+
+    func testSemanticAnswerKeepsIngressOrderAcrossSettleDelay() {
+        var driver = AttentionDriver()
+        activated(&driver, pid)
+        let offer = driver.offerSemantic(pid: pid, wid: 1, context: context())!
+        XCTAssertEqual(driver.decideDirected(.clickActivation, pid: pid, wid: 2,
+            context: context()).wid, 2)
+        let late = driver.decideSemantic(offer, context: context())
+        XCTAssertNil(late.wid)
+        XCTAssertEqual(late.reason, "ignored.staleSequence")
+        XCTAssertEqual(driver.attention.visibleFront?.wid, 2)
     }
 
     /// R2, every namer writes a fact and never a command: an answer from an app the user is NOT in records

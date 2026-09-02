@@ -12,8 +12,8 @@ final class TrackingTypesTests: XCTestCase {
         XCTAssertNotEqual(WindowIdentity(process: p1, wid: 7), WindowIdentity(process: p2, wid: 7))
     }
 
-    /// The same wid under two generations is two different windows, and a wid alone is never compared: the
-    /// WindowServer reuses those too.
+    /// Process qualification makes ownership and stale-callback ordering explicit even though macOS keeps
+    /// the WindowServer number itself unique for the login session.
     func testWindowIdentityOrdersByProcessThenWid() {
         XCTAssertLessThan(WindowIdentity(process: p1, wid: 9), WindowIdentity(process: p2, wid: 1))
         XCTAssertLessThan(WindowIdentity(process: p1, wid: 1), WindowIdentity(process: p1, wid: 2))
@@ -22,5 +22,13 @@ final class TrackingTypesTests: XCTestCase {
     /// Arrival order is what `AttentionModel` compares, so it has to be a total order on its own.
     func testIngressSequenceOrders() {
         XCTAssertLessThan(IngressSequence(rawValue: 1), IngressSequence(rawValue: 2))
+    }
+
+    func testSnapshotAnswersOnlyApplyForTheNewestIssue() {
+        var order = QueryIssueOrder()
+        let old = order.issue()
+        let new = order.issue()
+        XCTAssertFalse(order.accepts(old))
+        XCTAssertTrue(order.accepts(new))
     }
 }

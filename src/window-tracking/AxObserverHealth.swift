@@ -1,4 +1,28 @@
 import Foundation
+import CoreGraphics
+
+/// Correlates an AX destroy with the WindowServer order-out for that same surface. Delivery for one window
+/// says nothing about whether the app will announce its next close, so the exemption is single-use and
+/// scoped by wid rather than becoming a permanent per-process capability.
+struct AxDestroyCorrelation: Equatable {
+    static let horizon: TimeInterval = 2
+    private var deliveredAt = [CGWindowID: TimeInterval]()
+
+    mutating func note(_ wid: CGWindowID, at: TimeInterval) {
+        discardExpired(at)
+        deliveredAt[wid] = at
+    }
+
+    mutating func shouldProbe(_ wid: CGWindowID, at: TimeInterval) -> Bool {
+        discardExpired(at)
+        guard deliveredAt.removeValue(forKey: wid) != nil else { return true }
+        return false
+    }
+
+    private mutating func discardExpired(_ at: TimeInterval) {
+        deliveredAt = deliveredAt.filter { at - $0.value <= Self.horizon }
+    }
+}
 
 enum AxNotificationCapability: CaseIterable, Hashable {
     case focusedWindowChanged
@@ -22,6 +46,26 @@ enum AxNotificationCapability: CaseIterable, Hashable {
     /// incoming tab, but follow-up testing found that wrong for Finder, for Merge All Windows, and for an
     /// ungrouped window joining a group — so it is measured here before it is believed anywhere.
     case focusedTabChanged
+    /// **The app naming its own new window.** The WindowServer's 811 is always first (measured 11/11 on real
+    /// apps, by 36-597ms), so 811 remains the primary discovery trigger. AX creation carries what 811 cannot:
+    /// a live `AXUIElement` for the window, which saves the `kAXWindows` acquisition round trip, and
+    /// that element's `AXTabGroup`, readable inside the callback, so a mint is classified as a tab of a known
+    /// group or a standalone window at the instant it appears.
+    ///
+    /// It means "an AXWindow element came into existence", NOT "a window was created": it also fires when a
+    /// retained window is shown again (where the WindowServer emits only an order-in) and when a background
+    /// tab is selected for the first time. Every consumer must be idempotent for an already-tracked wid.
+    case windowCreated
+    /// **The app saying one of its windows is gone.** The only prompt signal for the four close shapes the
+    /// WindowServer cannot report: closed while minimized, while the app is hidden, while on another Space,
+    /// or as a background tab. Measured at ~175ms on 11 real closes across 6 apps, where WindowServer 816
+    /// covers only the on-screen case and 804 arrives 57-231s later.
+    ///
+    /// The notification's element is already dead, so `_AXUIElementGetWindow` cannot name it — but `CFEqual`
+    /// against the element AltTab cached for the window does, locally, in ~30ns
+    /// (`AxObserverRegistry.trackedElements`). An unmatched delivery is dropped before any attribute read,
+    /// which is what makes the known bursts (Finder: 16 in one millisecond, all sub-window elements) free.
+    case elementDestroyed
 
     /// **Off by default, and switchable on its own.** The probe registers a private notification on every
     /// app; nothing depends on the answer yet, and the set this provider actually needs must stay the narrow
@@ -50,6 +94,13 @@ enum AxProviderLifecycle: Equatable {
     case unresponsive
     case recovering
     case globalPermissionFailure
+}
+
+enum AxObserverInstanceState: Equatable {
+    case absent
+    case creating
+    case ready
+    case cooldown(until: MonotonicTimestamp)
 }
 
 enum AxObserverError: Equatable {
@@ -96,6 +147,8 @@ struct AxObserverDiagnostics: Equatable {
     var lastSuccess: MonotonicTimestamp?
     var lastCallback: MonotonicTimestamp?
     var nextRetry: MonotonicTimestamp?
+    var observerCreationAttempts = 0
+    var consecutiveObserverCreationFailures = 0
 
     mutating func recordAttempt(_ capability: AxNotificationCapability) {
         attemptCount += 1
@@ -128,6 +181,7 @@ struct AxProcessObserverHealth: Equatable {
     var lifecycle = AxProviderLifecycle.unregistered
     var notifications: [AxNotificationCapability: AxNotificationState]
     var diagnostics = AxObserverDiagnostics()
+    var observer = AxObserverInstanceState.absent
 
     init(process: ProcessGeneration) {
         self.process = process
@@ -171,6 +225,9 @@ struct AxObserverRetryPolicy: Equatable {
 
 enum AxObserverHealthInput: Equatable {
     case processStarted(ProcessGeneration)
+    case beginObserverCreation(ProcessGeneration, at: MonotonicTimestamp)
+    case observerCreationResult(ProcessGeneration, observerGeneration: UInt64,
+                                error: AxObserverError?, at: MonotonicTimestamp)
     case beginSubscription(ProcessGeneration, AxNotificationCapability)
     case subscriptionResult(ProcessGeneration, observerGeneration: UInt64, AxNotificationCapability,
                             AxSubscriptionResult, at: MonotonicTimestamp)
@@ -196,6 +253,9 @@ enum AxObserverHealthIgnoreReason: Equatable {
 enum AxObserverHealthDecision: Equatable {
     case processRegistered(ProcessGeneration)
     case processGenerationReplaced(ProcessGeneration, cancelledObserverGeneration: UInt64)
+    case observerCreationStarted(observerGeneration: UInt64)
+    case observerReady(observerGeneration: UInt64)
+    case observerCreationRetry(at: MonotonicTimestamp)
     case subscriptionStarted(AxNotificationCapability, observerGeneration: UInt64)
     case capabilitySubscribed(AxNotificationCapability)
     case capabilityUnsupported(AxNotificationCapability)
@@ -214,6 +274,9 @@ enum AxObserverHealth {
                        policy: AxObserverRetryPolicy = .default) -> AxObserverHealthDecision {
         switch input {
         case let .processStarted(process): return processStarted(&state, process)
+        case let .beginObserverCreation(process, time): return beginObserverCreation(&state, process, time, policy)
+        case let .observerCreationResult(process, generation, error, time):
+            return observerCreationResult(&state, process, generation, error, time, policy)
         case let .beginSubscription(process, capability):
             return beginSubscription(&state, process, capability)
         case let .subscriptionResult(process, generation, capability, result, time):
@@ -249,6 +312,58 @@ enum AxObserverHealth {
         entry.lifecycle = .globalPermissionFailure
         entry.diagnostics.lastError = .apiDisabled
         return entry
+    }
+
+    private static func beginObserverCreation(_ state: inout AxObserverHealthState,
+                                              _ process: ProcessGeneration, _ time: MonotonicTimestamp,
+                                              _ policy: AxObserverRetryPolicy) -> AxObserverHealthDecision {
+        guard !state.hasGlobalPermissionFailure else { return .ignored(.globalPermissionFailure) }
+        guard var entry = state.entries[process.pid] else { return .ignored(.unknownProcess) }
+        guard entry.process == process else { return .ignored(.staleProcessGeneration) }
+        if case let .cooldown(until) = entry.observer, time < until { return .ignored(.cooldown) }
+        guard entry.observer != .creating, entry.observer != .ready else {
+            return .ignored(.noRecoveryNeeded)
+        }
+        entry.diagnostics.observerGeneration &+= 1
+        entry.diagnostics.observerCreationAttempts += 1
+        entry.observer = .creating
+        entry.lifecycle = .registering
+        state.entries[process.pid] = entry
+        return .observerCreationStarted(observerGeneration: entry.diagnostics.observerGeneration)
+    }
+
+    private static func observerCreationResult(_ state: inout AxObserverHealthState,
+                                               _ process: ProcessGeneration, _ generation: UInt64,
+                                               _ error: AxObserverError?, _ time: MonotonicTimestamp,
+                                               _ policy: AxObserverRetryPolicy) -> AxObserverHealthDecision {
+        guard var entry = state.entries[process.pid] else { return .ignored(.unknownProcess) }
+        guard entry.process == process else { return .ignored(.staleProcessGeneration) }
+        guard entry.diagnostics.observerGeneration == generation else {
+            return .ignored(.staleObserverGeneration)
+        }
+        guard entry.observer == .creating else { return .ignored(.notificationState) }
+        guard let error else {
+            entry.observer = .ready
+            entry.lifecycle = .registering
+            entry.diagnostics.lastSuccess = time
+            entry.diagnostics.lastError = nil
+            entry.diagnostics.nextRetry = nil
+            entry.diagnostics.consecutiveObserverCreationFailures = 0
+            state.entries[process.pid] = entry
+            return .observerReady(observerGeneration: generation)
+        }
+        if error == .apiDisabled { return permissionFailed(&state) }
+        entry.diagnostics.consecutiveObserverCreationFailures += 1
+        let tier = entry.diagnostics.consecutiveObserverCreationFailures
+        var delay = min(policy.initialSparseDelay, policy.sparseCooldown)
+        for _ in 1 ..< tier { delay = min(policy.sparseCooldown, adding(delay, to: delay)) }
+        let retry = adding(delay, to: time)
+        entry.observer = .cooldown(until: retry)
+        entry.lifecycle = .degraded
+        entry.diagnostics.lastError = error
+        entry.diagnostics.nextRetry = retry
+        state.entries[process.pid] = entry
+        return .observerCreationRetry(at: retry)
     }
 
     private static func beginSubscription(_ state: inout AxObserverHealthState, _ process: ProcessGeneration,
@@ -358,6 +473,8 @@ enum AxObserverHealth {
         var entry = entry
         let cancelled = entry.diagnostics.observerGeneration
         entry.diagnostics.observerGeneration &+= 1
+        entry.diagnostics.observerCreationAttempts += 1
+        entry.observer = .creating
         entry.diagnostics.lastError = error
         entry.diagnostics.resetCannotComplete()
         entry.diagnostics.nextRetry = nil
@@ -374,6 +491,7 @@ enum AxObserverHealth {
             guard var entry = state.entries[pid] else { continue }
             resetAttemptableCapabilities(&entry)
             entry.lifecycle = .globalPermissionFailure
+            entry.observer = .absent
             entry.diagnostics.lastError = .apiDisabled
             entry.diagnostics.nextRetry = nil
             state.entries[pid] = entry
@@ -386,8 +504,9 @@ enum AxObserverHealth {
         state.hasGlobalPermissionFailure = false
         for pid in Array(state.entries.keys) {
             guard var entry = state.entries[pid] else { continue }
-            if entry.diagnostics.observerGeneration > 0 { entry.diagnostics.observerGeneration &+= 1 }
+            entry.observer = .absent
             entry.lifecycle = .recovering
+            entry.diagnostics.consecutiveObserverCreationFailures = 0
             state.entries[pid] = entry
         }
         return .globalRecoveryStarted(state.entries.values.map(\.process).sorted())

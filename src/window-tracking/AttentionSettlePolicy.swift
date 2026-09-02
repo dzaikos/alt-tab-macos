@@ -27,9 +27,7 @@ struct AttentionSettlePolicy {
     }
 
     struct Pending: Equatable {
-        let wid: CGWindowID
-        /// the arrival that armed the current deadline — what a firing timer identifies itself by
-        let armedAt: TimeInterval
+        let offer: SemanticAttentionOffer
     }
 
     private(set) var pending = [pid_t: Pending]()
@@ -37,18 +35,18 @@ struct AttentionSettlePolicy {
     /// An answer arrived. It supersedes whatever this process had pending — including its deadline, which is
     /// what makes a run of answers collapse rather than commit the first one `settle` after it started.
     /// Returns when the caller should ask `fire`.
-    mutating func offer(pid: pid_t, wid: CGWindowID, now: TimeInterval,
-                        settle: TimeInterval = Self.userSettle) -> (deadline: TimeInterval, armedAt: TimeInterval) {
-        pending[pid] = Pending(wid: wid, armedAt: now)
-        return (now + settle, now)
+    mutating func offer(_ offer: SemanticAttentionOffer, now: TimeInterval,
+                        settle: TimeInterval = Self.userSettle) -> (deadline: TimeInterval, token: IngressSequence) {
+        pending[offer.process.pid] = Pending(offer: offer)
+        return (now + settle, offer.sequence)
     }
 
-    /// A deadline fired. `armedAt` NAMES the arrival that armed it: a timer from a superseded answer must
+    /// A deadline fired. `token` names the arrival that armed it: a timer from a superseded answer must
     /// commit nothing, or a burst commits once per member after all. Returns the window to commit, or nil.
-    mutating func fire(pid: pid_t, armedAt: TimeInterval) -> CGWindowID? {
-        guard let entry = pending[pid], entry.armedAt == armedAt else { return nil }
+    mutating func fire(pid: pid_t, token: IngressSequence) -> SemanticAttentionOffer? {
+        guard let entry = pending[pid], entry.offer.sequence == token else { return nil }
         pending[pid] = nil
-        return entry.wid
+        return entry.offer
     }
 
     /// A process died. Its pending answer names a window that no longer exists, and a reused pid must not

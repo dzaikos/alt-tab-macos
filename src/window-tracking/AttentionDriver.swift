@@ -10,6 +10,14 @@ enum DirectedAttentionKind: Equatable {
     case commandBacktick
 }
 
+/// An AX semantic answer stamped when it enters the main-thread model, before burst settling or discovery
+/// can delay it. The sequence therefore expresses observation order, not timer completion order.
+struct SemanticAttentionOffer: Equatable {
+    let process: ProcessGeneration
+    let wid: CGWindowID
+    let sequence: IngressSequence
+}
+
 /// **Drives `AttentionModel` from the reducer's input stream.** It holds the model's state and allocates
 /// arrival sequences; every decision itself belongs to the pure kernel.
 ///
@@ -77,16 +85,31 @@ struct AttentionDriver {
         return Outcome(wid: result.wid, reason: result.reason, observedWid: wid, readPid: nil)
     }
 
-    /// An answer arriving from the AX provider rather than as a reducer input. Same sequence space, so a late
-    /// answer is measured against the directed evidence that may have overtaken it.
-    mutating func decideSemantic(pid: pid_t, wid: CGWindowID, context: Context) -> Outcome {
+    /// Stamp an AX answer at ingress. Settling may delay when it is reduced, but never redates it.
+    mutating func offerSemantic(pid: pid_t, wid: CGWindowID, context: Context) -> SemanticAttentionOffer? {
         syncFrontmost(context)
-        guard let process = register(pid, context), let identity = identity(wid, process, context) else {
-            return Outcome(wid: nil, reason: "unknownProcess", observedWid: wid, readPid: nil)
+        guard let process = register(pid, context) else { return nil }
+        return SemanticAttentionOffer(process: process, wid: wid, sequence: nextAttention())
+    }
+
+    /// Reduce the already-stamped answer. A click that arrived during the settle interval has a later
+    /// sequence and wins even though this method is called last.
+    mutating func decideSemantic(_ offer: SemanticAttentionOffer, context: Context) -> Outcome {
+        syncFrontmost(context)
+        guard context.generation(offer.process.pid) == offer.process,
+              let identity = identity(offer.wid, offer.process, context) else {
+            return Outcome(wid: nil, reason: "unknownProcess", observedWid: offer.wid, readPid: nil)
         }
         let result = reduceAttention([.named(.app, observed: identity.observed,
-            representative: identity.representative, nextAttention())])
-        return Outcome(wid: result.wid, reason: result.reason, observedWid: wid, readPid: nil)
+            representative: identity.representative, offer.sequence)])
+        return Outcome(wid: result.wid, reason: result.reason, observedWid: offer.wid, readPid: nil)
+    }
+
+    mutating func decideSemantic(pid: pid_t, wid: CGWindowID, context: Context) -> Outcome {
+        guard let offer = offerSemantic(pid: pid, wid: wid, context: context) else {
+            return Outcome(wid: nil, reason: "unknownProcess", observedWid: wid, readPid: nil)
+        }
+        return decideSemantic(offer, context: context)
     }
 
     mutating func processExited(_ generation: ProcessGeneration) {
@@ -126,6 +149,8 @@ struct AttentionDriver {
         case .altTabFocusedWindowInFrontmostApp: return "altTab"
         case .axFocusedWindowReadFailed: return "axReadFailed"
         case .livenessConfirmedDead: return "livenessDead"
+        case .axElementEnded: return "axElementEnded"
+        case .axElementReconciled: return "axElementReconciled"
         case .cgsWindowListsRead: return "phantomScan"
         case .zOrderRead: return "zOrderSeed"
         case .attentionCommitted: return "attentionCommitted"
@@ -168,6 +193,7 @@ struct AttentionDriver {
              .windowMovedOrResized, .zOrderRead, .spaceMembershipChanged,
              .spaceTransitionStarted, .spaceChangeSettled, .discoveryLanded, .titleAndTabsRead,
              .windowServerStateRead, .spacesSynced, .cgsWindowListsRead,
+             .axElementEnded, .axElementReconciled,
              .holdReleaseCheck, .dragOutCheck,
              // Our own commit coming back through the bridge. Offering it again would decide against our own
              // output.

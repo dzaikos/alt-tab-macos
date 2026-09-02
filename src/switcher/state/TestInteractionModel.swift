@@ -633,7 +633,7 @@ struct TestInteractionModel {
             // every unplaced wid is a confirmed empty. The contradiction is a live-OS anomaly (#5954) with no
             // recording to model it — inventing one would grade changes against a world we have not observed.
             e.readUnits.append([.input(.spacesSynced(windowToSpaces: spaceMap, queried: queriedWids,
-                placedByWindowServer: [], topologyChanged: false))])
+                answered: queriedWids, placedByWindowServer: [], topologyChanged: false))])
         }
         // phantom pass: active tabs on the visible Space are VISIBLE; every wid is in ALL (Finder retains
         // the windows). The order of THIS vs the title/sync reads is exactly the rec24c/rec24e race the
@@ -644,7 +644,8 @@ struct TestInteractionModel {
         let visible = Set(world.filter { $0.space == currentVisibleSpace && !$0.isMinimized }.map { $0.activeWid })
             .subtracting(transitioning)
         let all = Set(world.flatMap { $0.allWids })
-        e.readUnits.append([.input(.cgsWindowListsRead(visible: visible, all: all))])
+        e.readUnits.append([.input(.cgsWindowListsRead(visible: visible, all: all,
+            queried: queriedWids))])
         // the switcher captures what it is showing; the pixels land after the reads that decided the layout
         e.readUnits.append(world.map { .thumbnailCaptured(wid: $0.activeWid) })
         return e

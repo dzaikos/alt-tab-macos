@@ -70,6 +70,45 @@ final class WindowEventReducerFocusTests: XCTestCase {
         XCTAssertEqual(order(s, Self.reaperMainWid), 0)
     }
 
+    func testWindowServerDestroyRetiresTheSurfaceBeforeRemovingIt() {
+        var s = state([window(Self.reaperMainWid, Self.reaperPid, "Main", order: 0)],
+            frontmost: Self.reaperPid)
+        let effects = WindowEventReducer.reduce(&s, .windowDestroyed(wid: Self.reaperMainWid))
+        XCTAssertEqual(s.window(Self.reaperMainWid)?.lifecycle, .surfaceEnded)
+        let retirement = effects.firstIndex(of: .retireSurface(Self.reaperMainWid))
+        let removal = effects.firstIndex(of: .removeWindow(Self.reaperMainWid))
+        XCTAssertNotNil(retirement)
+        XCTAssertNotNil(removal)
+        XCTAssertLessThan(retirement!, removal!)
+    }
+
+    func testAxElementEndWaitsForCrossSourceReconciliation() {
+        var s = state([window(Self.reaperMainWid, Self.reaperPid, "Main", order: 0)],
+            frontmost: Self.reaperPid)
+        let effects = WindowEventReducer.reduce(&s, .axElementEnded(wid: Self.reaperMainWid))
+        XCTAssertEqual(s.window(Self.reaperMainWid)?.lifecycle, .axElementEnded)
+        XCTAssertTrue(effects.contains(.reconcileAxElementEnd(Self.reaperMainWid)))
+        XCTAssertFalse(effects.contains(.removeWindow(Self.reaperMainWid)))
+        _ = WindowEventReducer.reduce(&s, .axElementReconciled(
+            wid: Self.reaperMainWid, verdict: .inconclusive))
+        XCTAssertEqual(s.window(Self.reaperMainWid)?.lifecycle, .replacementPending)
+    }
+
+    func testAxReplacementHealsWhileConfirmedCloseRemoves() {
+        var s = state([window(Self.reaperMainWid, Self.reaperPid, "Main", order: 0)],
+            frontmost: Self.reaperPid)
+        _ = WindowEventReducer.reduce(&s, .axElementEnded(wid: Self.reaperMainWid))
+        let healed = WindowEventReducer.reduce(&s, .axElementReconciled(
+            wid: Self.reaperMainWid, verdict: .replacementFound))
+        XCTAssertEqual(s.window(Self.reaperMainWid)?.lifecycle, .alive)
+        XCTAssertFalse(healed.contains(.removeWindow(Self.reaperMainWid)))
+        _ = WindowEventReducer.reduce(&s, .axElementEnded(wid: Self.reaperMainWid))
+        let closed = WindowEventReducer.reduce(&s, .axElementReconciled(
+            wid: Self.reaperMainWid, verdict: .confirmedClosed))
+        XCTAssertEqual(s.window(Self.reaperMainWid)?.lifecycle, .confirmedClosed)
+        XCTAssertTrue(closed.contains(.removeWindow(Self.reaperMainWid)))
+    }
+
     /// The frontmost app's last window closes: there is nothing of its own left to promote, so the global
     /// shift stands (the app is on its way to windowless).
     func testRemovingTheFrontmostAppsOnlyWindowPromotesNothing() {

@@ -8,10 +8,11 @@ class Windows {
     /// so a rediscovered tab or re-shown window is neither stranded at the back nor wrongly given a front the
     /// user has since left. Cleared on destroy/removal. See `TrackedWindowState.FocusPromotion`.
     static var windowsPendingFocusPromotion = [CGWindowID: TrackedWindowState.FocusPromotion]()
-    /// **Wids the WindowServer said were BORN, as opposed to reused.** A create event (811) is the only thing
-    /// that tells the two apart, and the difference decides whether an arrival may take the front: a wid that
-    /// joins the visible Space with no create is a tab switch minting nothing, so the user went there, while a
-    /// wid that was born joins that same Space just by existing. Reading the join as attention fronted every
+    /// **Wids the WindowServer said were newly created, rather than existing surfaces shown again.** A create
+    /// event (811) is the only thing that tells the two apart, and the difference decides whether an arrival
+    /// may take the front: a wid that joins the visible Space with no create is a tab switch minting nothing,
+    /// so the user went there, while a wid that was born joins that same Space just by existing. Reading the
+    /// join as attention fronted every
     /// new window whatever the user was doing (twenty background windows at once; a launch finishing
     /// after the user had moved on), so `discoveryLanded` keeps the promotion for a created wid only when it
     /// took another window's place. A window that really did take keys is fronted by its app's own answer, not
@@ -30,6 +31,19 @@ class Windows {
     /// non-phantom; `WindowServerEvents` inserts on the backgrounding 1326 (only right after a create) and
     /// clears on a timeout, on removal, or once the wid becomes a real background tab (`isTabbed`, hidden anyway).
     static var windowsHeldVisibleForTab = Set<CGWindowID>()
+    private struct SurfaceRetirement {
+        let oldWid: CGWindowID
+        let pid: pid_t
+        let element: AXUIElement
+        let expiresAt: TimeInterval
+        let focusedAt: TimeInterval
+        let creationOrder: Int
+        let thumbnail: CALayerContents?
+        let groupMembers: [CGWindowID]
+        let groupRepresentative: CGWindowID?
+        let wasFocusedWindow: Bool
+    }
+    private static var surfaceRetirements = [SurfaceRetirement]()
     private static var lastWindowActivityType = WindowActivityType.none
     private static var shouldSelectBestMatchOnSearchChange = false
     private static var shouldRestoreDefaultSelectionOnSearchClear = false
@@ -560,6 +574,7 @@ class Windows {
             raw.bounds.origin, raw.bounds.size, .axVerified, evidence)
         window.semanticSurface = semantic
         appendWindow(window)
+        restoreSurfaceContinuity(window, element: windowAxUiElement)
         logAdmission(decision, raw, app)
         return (window, true)
     }
@@ -703,6 +718,58 @@ class Windows {
         }
     }
 
+    /// Capture continuity facts without retaining the old `Window`. A WindowServer destroy can be a shell
+    /// replacement while the app keeps one AX window; the record transfers only on explicit AX equality.
+    static func retireSurfaceForReplacement(_ wid: CGWindowID) {
+        let now = ProcessInfo.processInfo.systemUptime
+        surfaceRetirements.removeAll { $0.expiresAt <= now }
+        guard let window = byWindowId[wid], let element = window.axUiElement else { return }
+        let members = TabGroups.siblingWids(of: wid) ?? [wid]
+        let representative = TabGroups.groupId(of: wid).flatMap { TabGroups.representativeByGroup[$0] }
+        surfaceRetirements.append(SurfaceRetirement(oldWid: wid, pid: window.application.pid,
+            element: element, expiresAt: now + 2, focusedAt: window.focusedAt,
+            creationOrder: window.creationOrder, thumbnail: window.thumbnail, groupMembers: members,
+            groupRepresentative: representative,
+            wasFocusedWindow: window.application.focusedWindow === window))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            let now = ProcessInfo.processInfo.systemUptime
+            surfaceRetirements.removeAll { $0.expiresAt <= now }
+        }
+    }
+
+    static func forgetSurfaceRetirements(_ pid: pid_t) {
+        surfaceRetirements.removeAll { $0.pid == pid }
+    }
+
+    private static func restoreSurfaceContinuity(_ window: Window, element: AXUIElement) {
+        let now = ProcessInfo.processInfo.systemUptime
+        surfaceRetirements.removeAll { $0.expiresAt <= now }
+        guard let i = surfaceRetirements.firstIndex(where: {
+            $0.pid == window.application.pid && CFEqual($0.element, element)
+        }), let newWid = window.cgWindowId else { return }
+        let retirement = surfaceRetirements.remove(at: i)
+        window.focusedAt = retirement.focusedAt
+        window.creationOrder = retirement.creationOrder
+        window.thumbnail = retirement.thumbnail
+        let newerFocusExists = list.contains { $0 !== window && $0.focusedAt > retirement.focusedAt }
+        let restoreFocus = retirement.wasFocusedWindow && !newerFocusExists
+            && window.application.focusedWindow == nil
+        if restoreFocus { window.application.focusedWindow = window }
+        var state = TrackedWindowStateBridge.snapshot()
+        _ = state.recomputeFocusRanks(preferring: restoreFocus ? newWid : nil)
+        let members = retirement.groupMembers.map { $0 == retirement.oldWid ? newWid : $0 }
+            .filter { state.window($0) != nil }
+        if members.count > 1 {
+            let representative = retirement.groupRepresentative == retirement.oldWid
+                ? newWid : (retirement.groupRepresentative.flatMap { members.contains($0) ? $0 : nil } ?? newWid)
+            let mutation = state.formGroup(members, representative: representative,
+                reason: "surfaceReplacement")
+            for line in mutation.logs { Logger.debug { line } }
+        }
+        TrackedWindowStateBridge.apply(state)
+        Logger.debug { "surface continuity #\(retirement.oldWid)→#\(newWid) pid=\(retirement.pid)" }
+    }
+
     static func removeWindows(_ windows: [Window], _ addWindowlessWindowIfNeeded: Bool) {
         // Release any pooled TileView pinned to a window we're removing so its thumbnail
         // IOSurface can deallocate now. Otherwise the layer.contents reference keeps the
@@ -727,6 +794,7 @@ class Windows {
                 w.application.focusedWindow = nil
             }
             if let wid = w.cgWindowId {
+                AxObserverRegistry.noteTrackedElement(pid: w.application.pid, wid: wid, element: nil)
                 byWindowId.removeValue(forKey: wid)
                 windowsPendingFocusPromotion.removeValue(forKey: wid)
                 recentlyCreatedWindows.remove(wid)

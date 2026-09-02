@@ -18,8 +18,10 @@ order** — no other rule looks at runs of events any more.
 
 - an answer supersedes whatever that process had pending, **including its deadline** — otherwise a run
   commits `settle` after its FIRST member rather than after its last
-- a deadline is identified by the arrival that armed it, so a timer left over from a superseded answer
-  commits nothing
+- every answer carries the process generation and ingress sequence allocated when AX delivered it; settling
+  delays commitment without redating the evidence behind a click that arrived during the delay
+- a deadline is identified by that unique ingress sequence, so a timer left over from a superseded answer
+  commits nothing even if two offers share the same clock reading
 - state is per process: one app's burst never delays another app's answer
 - a process exit drops its pending answer, so a reused pid inherits nothing
 
@@ -40,3 +42,7 @@ event in the last 500ms, the answer is programmatic and settles for 200ms. That 
 - **testAProcessExitDropsItsPendingAnswer** — and a reused pid inherits nothing.
 - **testRecentInputSelectsTheShortSettle** — input recency chooses latency rather than changing verdicts.
 - **testAProgrammaticRunSpaced150msApartCommitsOnce** — A-11's wider raise still ends on its last answer.
+
+The cross-policy integration case lives in `AttentionDriverTests`:
+`AX(B2) → exact click(B1) → AX timer fires` leaves B1 in front because the delayed AX offer retains its
+earlier sequence.

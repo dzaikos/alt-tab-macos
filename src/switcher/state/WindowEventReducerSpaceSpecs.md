@@ -50,20 +50,22 @@ correction from 19ms to 220ms after the summon. It looks free and it is not.
   per-window Space sync, the WindowServer state re-query for every tracked window, the shortcut re-check and
   the repaint. Collapsing the two branches into one would either run this storm-time work early or lose it.
 
-### C. The Spaces answer applies only to the windows it was asked about
+### C. Scope and completion are separate facts
 
 `syncSpacesState` captures the tracked wid list on main, does its Space enumeration plus per-window backfill
 off-main, and applies the result when it lands. A window discovered in that gap is in the model but was never
 part of the question, so the pass has nothing to say about it unless its Space enumeration happened to list it.
 Treating that silence as an answer turned it into a verdict — "CGS places this window nowhere", the strong
 phantom signal — and hid a window whose own discovery had just read its Space correctly, until a later pass
-happened to cover it. The input now carries the wids it queried, and only those are wiped by its silence.
+happened to cover it. The input carries both the wids in the issue-time scope and the wids for which a query
+actually completed. Silence outside the scope and failure inside it both preserve the last membership.
 
 - **testAnAnswerDoesNotWipeAWindowItNeverAskedAbout** — a window outside `queried` keeps its Space and stays
   shown.
-- **testAQueriedWindowWithNoAnswerIsStillWiped** — a window inside `queried` that the map does not place is
-  wiped and turns phantom: that is CGS answering "no Space", the evidence that retires dead group members and
-  feeds the dead-window sweep.
+- **testAQueriedWindowWhoseDirectQueryFailedKeepsItsLastMembership** — a window inside `queried` but outside
+  `answered` keeps its prior Space; attempted is not answered.
+- **testAnExplicitEmptyAnswerWipesAQueriedWindow** — a completed `[]` is preserved as an explicit negative,
+  turns the window phantom, and feeds the dead-window sweep.
 - **testAnAnswerIsAppliedEvenToAWindowItNeverAskedAbout** — the map is built by enumerating every Space, not
   from the queried list, so a window appended mid-flight is usually in it. That answer is applied: skipping is
   for silence, and dropping a fact we hold would leave the window under the current-Space guess its discovery
@@ -78,7 +80,8 @@ on all three, permanently, since nothing re-derives membership afterwards (#5954
 corroborates the wids it could not place against the WindowServer, which omits a wid it does not know and
 reports a non-zero `spaceTypeMask` for one it places, and passes the contradictions to the reducer.
 
-- **testAContradictedEmptyKeepsTheLastKnownMembership** — the WindowServer places a window the map does not:
+- **testAContradictedEmptyKeepsTheLastKnownMembership** — the WindowServer places a window whose completed
+  answer is empty:
   it keeps the last membership CGS itself reported and stays shown. Stale at worst, where the alternatives
   are hiding it with no recovery path or inventing a Space other rules would read as truth.
 - **testAPlacedWindowStillTakesItsNewSpace** — a real answer always beats the keep, so a window that genuinely
@@ -105,3 +108,10 @@ in between, so this is not a no-op at the event layer, only at the answer layer.
   first.
 
 Both have live counterparts in the QA suite: an abandoned swipe, and three overlapping swipes.
+
+### F. Whole topology snapshots apply in issue order
+
+Space queries run on a concurrent lane. Each receives a `QueryIssueOrder` token before leaving main, and only
+the newest issued answer may replace `Spaces` topology. A response cannot become newer merely by reaching
+main last. `TrackingTypesTests.testSnapshotAnswersOnlyApplyForTheNewestIssue` pins the fence itself; every
+reactive topology read advances it, including the leading edge of a later Space transition.

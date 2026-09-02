@@ -39,6 +39,54 @@ final class AxObserverHealthTests: XCTestCase {
         )
     }
 
+    func testObserverCreationFailureHasABoundedRecoverableStage() {
+        var state = state([process])
+        guard case let .observerCreationStarted(generation) = AxObserverHealth.reduce(&state,
+            .beginObserverCreation(process, at: time(0)), policy: policy) else {
+            return XCTFail("creation did not start")
+        }
+        XCTAssertEqual(AxObserverHealth.reduce(&state, .observerCreationResult(process,
+            observerGeneration: generation, error: .genericFailure, at: time(0)), policy: policy),
+            .observerCreationRetry(at: time(25)))
+        XCTAssertEqual(AxObserverHealth.reduce(&state, .beginObserverCreation(process, at: time(24)),
+            policy: policy), .ignored(.cooldown))
+        guard case let .observerCreationStarted(retryGeneration) = AxObserverHealth.reduce(&state,
+            .beginObserverCreation(process, at: time(25)), policy: policy) else {
+            return XCTFail("creation did not retry")
+        }
+        XCTAssertEqual(retryGeneration, generation + 1)
+        XCTAssertEqual(AxObserverHealth.reduce(&state, .observerCreationResult(process,
+            observerGeneration: retryGeneration, error: nil, at: time(26)), policy: policy),
+            .observerReady(observerGeneration: retryGeneration))
+        XCTAssertEqual(state.entry(for: process)?.observer, .ready)
+    }
+
+    func testSuccessfulObserverCreationResetsFailureBackoff() {
+        var state = state([process])
+        guard case let .observerCreationStarted(first) = AxObserverHealth.reduce(&state,
+            .beginObserverCreation(process, at: time(0)), policy: policy) else {
+            return XCTFail("creation did not start")
+        }
+        _ = AxObserverHealth.reduce(&state, .observerCreationResult(process,
+            observerGeneration: first, error: .genericFailure, at: time(0)), policy: policy)
+        guard case let .observerCreationStarted(second) = AxObserverHealth.reduce(&state,
+            .beginObserverCreation(process, at: time(25)), policy: policy) else {
+            return XCTFail("creation did not retry")
+        }
+        _ = AxObserverHealth.reduce(&state, .observerCreationResult(process,
+            observerGeneration: second, error: nil, at: time(26)), policy: policy)
+        guard case let .subscriptionStarted(_, generation) = AxObserverHealth.reduce(&state,
+            .beginSubscription(process, .titleChanged)) else { return XCTFail("subscription did not start") }
+        guard case let .observerRebuildRequired(_, replacement) = AxObserverHealth.reduce(&state,
+            .subscriptionResult(process, observerGeneration: generation, .titleChanged,
+                .invalidObserver, at: time(27)), policy: policy) else {
+            return XCTFail("observer rebuild did not start")
+        }
+        XCTAssertEqual(AxObserverHealth.reduce(&state, .observerCreationResult(process,
+            observerGeneration: replacement, error: .genericFailure, at: time(30)), policy: policy),
+            .observerCreationRetry(at: time(55)))
+    }
+
     func testSuccessAndAlreadyRegisteredSubscribeTheirCapability() {
         for result in [AxSubscriptionResult.success, .alreadyRegistered] {
             var state = state([process])
@@ -210,7 +258,10 @@ final class AxObserverHealthTests: XCTestCase {
             .globalRecoveryStarted([process, other])
         )
         XCTAssertFalse(state.hasGlobalPermissionFailure)
-        XCTAssertEqual(state.entry(for: process)?.diagnostics.observerGeneration, 2)
+        XCTAssertEqual(state.entry(for: process)?.observer, .absent)
+        XCTAssertEqual(AxObserverHealth.reduce(&state,
+            .beginObserverCreation(process, at: time(20)), policy: policy),
+            .observerCreationStarted(observerGeneration: 2))
         XCTAssertEqual(state.entry(for: other)?.lifecycle, .recovering)
     }
 
@@ -291,13 +342,17 @@ final class AxObserverHealthTests: XCTestCase {
     /// else has to be optional and off by default. A new capability that is neither fails here, which is
     /// the point.
     ///
-    /// `titleChanged` was added deliberately, and it is the only one that has ever been added: it REPLACES
-    /// AX reads the app was already making against every app on every order event, it is a window-level
-    /// notification rather than an element-level stream, and it registered on every app owning user-facing
-    /// windows in the 52-app probe. `focusedUIElementChanged` is the one that must never appear here.
+    /// Three have been added deliberately, and every one of them REPLACES work the app was already doing
+    /// rather than widening the surface. `titleChanged` replaces AX reads made against every app on every
+    /// order event. `elementDestroyed` is the only prompt signal for a close while minimized, app-hidden, on
+    /// another Space or as a background tab, and its matching order-out consumes the one duplicate probe.
+    /// `windowCreated` carries a live element and its tab group while WindowServer remains the primary
+    /// physical discovery trigger. All three are window-level notifications, not element-level streams.
+    /// `focusedUIElementChanged` is the one that must never appear here.
     func testCapabilitySurfaceHasOnlyNarrowCoreNotifications() {
         let core = Set(AxNotificationCapability.allCases.filter { $0.isEnabled })
-        XCTAssertEqual(core, [.focusedWindowChanged, .mainWindowChanged, .titleChanged],
+        XCTAssertEqual(core, [.focusedWindowChanged, .mainWindowChanged, .titleChanged,
+                              .windowCreated, .elementDestroyed],
                        "a capability was added to the set every app gets subscribed to")
         XCTAssertFalse(AxNotificationCapability.focusedTabProbeEnabled,
                        "the focused-tab probe is a measurement and must stay off by default")
@@ -323,6 +378,44 @@ final class AxObserverHealthTests: XCTestCase {
         XCTAssertEqual(s.entry(for: process)?.lifecycle, .healthy)
         XCTAssertEqual(s.entry(for: process)?.notifications[.focusedTabChanged], .unsupported)
         XCTAssertTrue(s.entry(for: process)!.capabilities.contains(.focusedWindowChanged))
+    }
+
+    func testDestroyDeliveryOnlySuppressesTheMatchingWindowsNextProbe() {
+        var correlation = AxDestroyCorrelation()
+        correlation.note(10, at: 1)
+        XCTAssertTrue(correlation.shouldProbe(11, at: 1.1))
+        XCTAssertFalse(correlation.shouldProbe(10, at: 1.2))
+        XCTAssertTrue(correlation.shouldProbe(10, at: 1.3), "the correlation is single-use")
+    }
+
+    func testStaleDestroyDeliveryDoesNotSuppressAProbe() {
+        var correlation = AxDestroyCorrelation()
+        correlation.note(10, at: 1)
+        XCTAssertTrue(correlation.shouldProbe(10, at: 1 + AxDestroyCorrelation.horizon + 0.001))
+    }
+
+    func testAxNodeReplacementAlwaysKeepsTheWindow() {
+        XCTAssertEqual(AxElementEndPolicy.decide(ax: .foundReplacement, surfacePresent: false,
+            isTabbed: false, groupShrank: false, axQueryCoversWindow: true), .replacementFound)
+    }
+
+    func testAxDestroyAndWindowServerAbsenceConfirmClose() {
+        XCTAssertEqual(AxElementEndPolicy.decide(ax: .noAnswer, surfacePresent: false,
+            isTabbed: true, groupShrank: false, axQueryCoversWindow: false), .confirmedClosed)
+    }
+
+    func testRetainedSurfaceDoesNotShieldSemanticClose() {
+        XCTAssertEqual(AxElementEndPolicy.decide(ax: .absent, surfacePresent: true,
+            isTabbed: false, groupShrank: false, axQueryCoversWindow: true), .confirmedClosed)
+    }
+
+    func testAmbiguousTabAndOutOfScopeAbsencesRemainPending() {
+        XCTAssertEqual(AxElementEndPolicy.decide(ax: .absent, surfacePresent: true,
+            isTabbed: true, groupShrank: false, axQueryCoversWindow: true), .inconclusive)
+        XCTAssertEqual(AxElementEndPolicy.decide(ax: .absent, surfacePresent: true,
+            isTabbed: false, groupShrank: false, axQueryCoversWindow: false), .inconclusive)
+        XCTAssertEqual(AxElementEndPolicy.decide(ax: .absent, surfacePresent: true,
+            isTabbed: true, groupShrank: true, axQueryCoversWindow: true), .confirmedClosed)
     }
 
 }

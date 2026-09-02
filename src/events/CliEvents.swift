@@ -99,6 +99,19 @@ class CliServer {
             return QaTelemetryDrain(v: TrackingTelemetryState.schemaVersion,
                 records: TrackingTelemetryRecorder.drain())
         }
+        // **Fault injection: make an app look like one that never announces its window closes.** Takes a
+        // comma-separated pid list and REPLACES the muted set; an empty value clears it. Its
+        // `elementDestroyed` deliveries are then dropped on arrival, so the app never proves it delivers and
+        // every close of its windows falls back to the WindowServer's order-out probe. The fallback has no
+        // other way to be exercised — see `AxObserverRegistry.mutedDestroyPids` for why no real app can be
+        // asked to behave this way on demand.
+        if rawValue.hasPrefix("--qa-mute-ax-destroys=") {
+            let raw = rawValue.dropFirst("--qa-mute-ax-destroys=".count)
+            let pids = Set(raw.split(separator: ",").compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) })
+            AxObserverRegistry.muteDestroys(pids: pids)
+            Logger.info { "QA: muting ax destroys for \(pids.isEmpty ? "no pids" : "\(pids.sorted())")" }
+            return noOutput
+        }
         if rawValue.hasPrefix("--qa-mark=") {
             let mark = String(rawValue.dropFirst("--qa-mark=".count))
             Logger.info { "QAMARK \(mark)" }

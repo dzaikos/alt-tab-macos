@@ -213,7 +213,7 @@ final class TestReducerRunnerTests: XCTestCase {
             .input(.spaceMembershipChanged(wid: 91409, spaceId: 5335, added: false, now: 100.003, inSpaceTransition: false)),
             // 19:36:51.499 the Spaces re-query confirms it is on no Space (CGS probed it: empty)
             .input(.spacesSynced(windowToSpaces: [75934: [4594]], queried: [91409, 75934],
-                placedByWindowServer: [], topologyChanged: false)),
+                answered: [91409, 75934], placedByWindowServer: [], topologyChanged: false)),
             // ~19:36:51.6 the hold-release check fires while the burst is still going
             .input(.holdReleaseCheck(wid: 91409, attempt: 0)),
         ])
@@ -383,6 +383,29 @@ final class TestReducerRunnerTests: XCTestCase {
         XCTAssertEqual(harness.state.groups.siblingWids(of: 21)?.sorted(), [20, 21],
             "the shared AXTabGroup element groups them where titles and frames cannot")
         XCTAssertEqual(harness.violations, [], "convergence: \(harness.trace)")
+    }
+
+    func testUnknownTabReadCannotOverwriteTheLastCompletedObservation() {
+        var tracked = window(20, spaceIds: [3])
+        tracked.tabGroupObservation = .group(titles: ["A", "B"], token: 42)
+        tracked.tabCount = 2
+        let harness = TestReducerRunner(initial: state(windows: [tracked]))
+        harness.run([.input(.titleAndTabsRead(wid: 20, tabGroup: .unknown,
+            reconcileTabs: true, changedSoFar: false))])
+        XCTAssertEqual(harness.state.window(20)?.tabGroupObservation,
+            .group(titles: ["A", "B"], token: 42))
+        XCTAssertEqual(harness.state.window(20)?.tabCount, 2)
+    }
+
+    func testCompletedStandaloneObservationIsDistinctFromUnknown() {
+        var tracked = window(20, spaceIds: [3])
+        tracked.tabGroupObservation = .group(titles: ["A", "B"], token: 42)
+        tracked.tabCount = 2
+        let harness = TestReducerRunner(initial: state(windows: [tracked]))
+        harness.run([.input(.titleAndTabsRead(wid: 20, tabGroup: .standalone,
+            reconcileTabs: true, changedSoFar: false))])
+        XCTAssertEqual(harness.state.window(20)?.tabGroupObservation, .standalone)
+        XCTAssertEqual(harness.state.window(20)?.tabCount, 0)
     }
 
     /// nil-titles path: a group shrinks only on a POSITIVE signal.

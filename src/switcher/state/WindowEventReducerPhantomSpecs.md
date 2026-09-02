@@ -21,17 +21,26 @@ app's latch, did not. So Slack ended up with a real tile AND a windowless tile, 
 twice in the list and won't change even if I wait or switch windows".
 
 The same capture showed the second half of the bug. Slack, reopened from the Dock, keeps its window tagged
-invisible by CGS for seconds after it is on screen and focused, so the weak signal flagged the FOREGROUND
-window a phantom. Hidden but still holding MRU slot 0, it made the switcher's "previously-focused window"
-default count one visible window too far and focus the wrong app. A window the user is looking at is never
-a phantom, so `PhantomWindowDetector.cgsVerdict` now takes `isFocused` (front of the MRU AND app frontmost)
-and exempts it from the weak signal only — after the strong signal, so #5714 stands.
+invisible by CGS for seconds after it is already composited. The WindowServer ordered-in bit states that
+physical fact directly, so the weak CGS tag cannot flag an on-screen surface. This no longer depends on MRU
+or app-frontmost guesses.
 
 ---
 
 ## Test scenarios
 
 Mirrors `WindowEventReducerPhantomTests.swift` 1:1.
+
+### Snapshot scope
+
+The two CGS lists are a bulk answer about the wid set captured when the scan was issued. A window appended
+while the calls are in flight was never queried, so its absence is silence rather than the strong phantom
+signal. Positive list membership may still apply outside the captured set. The scan also carries an issue
+sequence, and an older whole answer is dropped before it can replace a newer one or erase targeted inventory
+updates.
+
+- **testSnapshotSilenceDoesNotJudgeAWindowCreatedAfterIssue** — an absent wid outside `queried` keeps its
+  existing verdict.
 
 ### A. Un-phantoming drops the app's stale windowless placeholder
 - **testUnphantomingEmitsRemoveWindowlessPlaceholder** — a latched-phantom window seen in both CGS lists

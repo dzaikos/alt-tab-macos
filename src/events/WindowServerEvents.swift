@@ -127,20 +127,10 @@ class WindowServerEvents {
             spaceTransitionUntil = ProcessInfo.processInfo.systemUptime + 0.5
             if isLeadingEdge { TrackedWindowStateBridge.dispatch(.spaceTransitionStarted) }
         case .windowCreated:
-            // the brand-new / lastCreated bookkeeping lives in the reducer (`.windowCreated`); the tap keeps
-            // the opt-in and the recycling edge — this number is now a DIFFERENT window than the one any
-            // remembered verdict was about, so the verdict goes before the subscription arrives.
-            // Forget the corpse: `wsWindows` is a dedup set, and `windowDestroyed` often never comes for a
-            // window that closed (an app that retains its CGWindow — measured: 90 creates, 0 destroys over a
-            // churn run), so the number may still be in it from the PREVIOUS window. Now that requests carry
-            // only the delta, a dedup hit would mean never asking for THIS window: deaf to it for its whole
-            // life. The full-array resend used to hide this. The subscription itself is sent by discovery,
-            // once the level is known.
-            wsWindows.remove(w0)
-            WindowSurfaceInventory.remove(w0)
-            // ...and any verdict about the OLD window behind this number, including the sweep's record of
-            // having failed to acquire it: this is a different window now and deserves its own attempts.
-            Applications.forgetAcquisitionFailure(w0)
+            // Creation bookkeeping lives in the reducer (`.windowCreated`). Window numbers are unique for
+            // the login session, so this event must not discard facts already learned for the same surface.
+            // Discovery subscribes after it has read the level.
+            break
         case .windowDestroyed:
             unsubscribe(w0)
             WindowSurfaceInventory.remove(w0)

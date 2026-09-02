@@ -50,9 +50,9 @@ class Window {
     /// other two members, and the window the user had just torn out vanished from the switcher for 515ms,
     /// until `spacesSynced` re-read the Space CGS had held for it the whole time. rec20's stray is answered
     /// by this flag alone — every claim rule reads it, with the Space still set
-    /// (`testExRepresentativeWithABorrowedSpaceIsClaimable`) — and an ex-member that is genuinely gone is not
-    /// left standing: `spacesSynced` applies `[]` to every wid it QUERIED and its map doesn't place, which
-    /// turns it phantom and hands it to the dead-window sweep.
+    /// (`testExRepresentativeWithABorrowedSpaceIsClaimable`) — and an ex-member that is genuinely gone is
+    /// not left standing: a completed empty Space answer turns it phantom and hands it to the dead-window
+    /// sweep. A failed query stays unknown and preserves this value until another provider answers.
     var spaceIsBorrowed = false
     /// The Space this window most recently LEFT (a 1326 names it), nil once it joins one again — the history
     /// tab-grouping needs to tell a just-backgrounded tab from a brand-new one. Owned by the reducer.
@@ -71,6 +71,9 @@ class Window {
     /// Tab-button count from this window's last AXTabGroup read (0 = none / not tabbed). Owned by the
     /// reducer; see `TabWindow.tabCount` for why the COUNT is trusted where the tab TITLES are not.
     var tabCount = 0
+    var tabGroupObservation = TabGroupObservation.unknown
+    var spaceMembershipObservation = SpaceMembershipObservation.unavailable
+    var lifecycle = WindowLifecycleState.alive
     /// True when `isFullscreen` was MIRRORED from the active tab sibling (a background tab gets no WS
     /// geometry event, so its own flag would go stale — the mirror keeps the fullscreen/minimized FILTERS
     /// correct for the whole group). Like `spaceIsBorrowed`, it marks a synthetic write: tab-grouping rules
@@ -124,6 +127,7 @@ class Window {
         semanticSurface = nil
         self.application = application
         self.axStatus = axStatus
+        lifecycle = axUiElement == nil ? .unverified : .alive
         cgWindowId = wid
         // Default a new window to the current Space rather than fetching its Space here: that fetch is a
         // blocking CGS call and `Window.init` runs on the main thread (#5721). A brand-new window is on the
@@ -131,6 +135,7 @@ class Window {
         // corrected off-main by Applications.syncSpacesState.
         self.updateSpacesAndScreen([wid: [Spaces.currentSpaceId]])
         updateFromAxAttributes(title, size, position, isFullscreen, isMinimized)
+        mirrorAxElementForDestroyMatching()
         debugId = "\(self.application.debugId) (wid:\(cgWindowId) title:\(self.title))"
         Window.globalCreationCounter += 1
         self.creationOrder = Window.globalCreationCounter
@@ -268,6 +273,17 @@ class Window {
     /// would hit a dead node; swap in the freshly-resolved element.
     func rebindAxElement(_ fresh: AXUIElement) {
         axUiElement = fresh
+        lifecycle = .alive
+        mirrorAxElementForDestroyMatching()
+    }
+
+    /// Keep `AxObserverRegistry`'s element mirror in step with this window's cached element. That mirror is
+    /// the only way an `AXUIElementDestroyed` can be attributed to a window: its element is dead by callback
+    /// time, so `CFEqual` against what we cached is the identity, and a window missing from the mirror simply
+    /// falls back to the WindowServer's order-out.
+    private func mirrorAxElementForDestroyMatching() {
+        guard let wid = cgWindowId else { return }
+        AxObserverRegistry.noteTrackedElement(pid: application.pid, wid: wid, element: axUiElement)
     }
 
     /// Re-resolve this window's current AXUIElement by matching its wid against the app's live windows, to
@@ -332,11 +348,13 @@ class Window {
                 }
             }
         }
-        // No optimistic removal: the window leaves Windows.list only when the OS confirms it's gone. Closing
-        // orders the window out, and WindowServerEvents turns that into an AX-liveness probe: a dead element
-        // means the window is gone, so Applications.removeIfClosedAfterOrderOut removes it. The WindowServer
-        // destroy event (804) is the backstop for a close that fires no order-out we see (already off-screen).
-        // The switcher reflects OS state, never a predicted one.
+        // No optimistic removal: the window leaves Windows.list only when the OS confirms it's gone, and
+        // three signals can say so. The app's own AXUIElementDestroyed is normally first and is the only one
+        // that reaches a close while the window is minimized, hidden, on another Space or a background tab.
+        // The order-out (816) covers the on-screen close for an app that has never been seen to deliver a
+        // destroy, via an AX-liveness probe. The WindowServer's destroy (804) is the last backstop, and it can
+        // lag by seconds — measured 7.4s behind the destroy — or never fire for an app that retains its
+        // CGWindow. The switcher reflects OS state, never a predicted one.
     }
 
     /// Every one of these commands is an AX write. A window kept on WindowServer evidence alone has no

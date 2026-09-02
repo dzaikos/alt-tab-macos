@@ -32,9 +32,40 @@ final class WindowSurfaceInventoryTests: XCTestCase {
         XCTAssertEqual(WindowSurfaceInventory.representativeWid(1), 2)
     }
 
-    func testWidRecyclingDropsTheOldRelationship() {
+    func testRemovingASurfaceDropsItsRelationship() {
         WindowSurfaceInventory.replace([raw(1), raw(2, parent: 1)])
         WindowSurfaceInventory.remove(2)
         XCTAssertEqual(WindowSurfaceInventory.representativeWid(2), 2)
+    }
+
+    func testLateFullSnapshotDoesNotEraseANewerTargetedUpsert() {
+        let old = WindowSurfaceInventory.beginSnapshot()
+        WindowSurfaceInventory.upsert([raw(2, parent: 1)])
+        WindowSurfaceInventory.replace([raw(2)], issuedAt: old)
+        XCTAssertEqual(WindowSurfaceInventory.raw(2)?.parentWid, 1)
+    }
+
+    func testLateFullSnapshotDoesNotResurrectANewerRemoval() {
+        WindowSurfaceInventory.replace([raw(1)])
+        let old = WindowSurfaceInventory.beginSnapshot()
+        WindowSurfaceInventory.remove(1)
+        WindowSurfaceInventory.replace([raw(1)], issuedAt: old)
+        XCTAssertNil(WindowSurfaceInventory.raw(1))
+    }
+
+    func testLateFullSnapshotDoesNotRestoreAnExitedProcessMissingFromTheInventory() {
+        let old = WindowSurfaceInventory.beginSnapshot()
+        WindowSurfaceInventory.remove(pid: 7)
+        WindowSurfaceInventory.replace([raw(1)], issuedAt: old)
+        XCTAssertNil(WindowSurfaceInventory.raw(1))
+    }
+
+    func testOlderFullSnapshotCannotOverwriteANewerFullSnapshot() {
+        let old = WindowSurfaceInventory.beginSnapshot()
+        let new = WindowSurfaceInventory.beginSnapshot()
+        WindowSurfaceInventory.replace([raw(2)], issuedAt: new)
+        WindowSurfaceInventory.replace([raw(1)], issuedAt: old)
+        XCTAssertNil(WindowSurfaceInventory.raw(1))
+        XCTAssertNotNil(WindowSurfaceInventory.raw(2))
     }
 }

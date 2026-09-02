@@ -147,7 +147,8 @@ final class TestReducerRunner {
         case .scheduleHoldReleaseCheck, .scheduleDragOutCheck:
             pendingTimers.append(effect)
         case .discoverWindow, .probeWindowLiveness, .readTitleAndTabs, .queryWindowServerState,
-             .discoverInactiveTabs, .refreshSpacesTopology, .refreshSpacesTopologyAndSync:
+             .discoverInactiveTabs, .reconcileAxElementEnd,
+             .refreshSpacesTopology, .refreshSpacesTopologyAndSync:
             pendingRequests.append(effect)
         case .log(let line):
             trace.append("[\(stepIndex)] \(line)")
@@ -159,7 +160,7 @@ final class TestReducerRunner {
             deferredCaptures.append(wid)
         case .copyThumbnail, .applyFocus, .updateScreenId, .removeWindowlessPlaceholder,
              .addWindowlessPlaceholder, .readFocusedWindowOnActivation,
-             .checkShortcutsForFocusedWindow:
+             .checkShortcutsForFocusedWindow, .retireSurface:
             break  // display/AppKit-side; no model content beyond what the reducer already wrote
         }
     }
