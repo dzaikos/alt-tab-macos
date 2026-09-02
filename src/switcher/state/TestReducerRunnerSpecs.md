@@ -203,6 +203,9 @@ order nothing pins, so both arrival orders are tested — the same thing `Handov
   never seen, so the edge waits in `pendingHandoverEdge` and is applied at discovery.
 - **testPendingHandoverIsDroppedWhenTheDiscoveredWidBelongsToAnotherApp** — the pid check moves to
   CONSUMPTION when one side was untracked, that being the first moment a pid exists.
+- **testMintedTabSwitchRefreshesTheIncomingFrameFromTheWindowServer** — the minted tab arrives wearing the
+  frame it had as a BACKGROUND tab, and no geometry event will ever correct it (we subscribe to that wid only
+  after its order-in). Forming the group asks the WindowServer, as the tracked half does on `joinedSpace`.
 - **testPendingHandoverIsDrainedWhenTheMintIsSuperseded** — a mint superseded before discovery never becomes
   a window, so the edge naming it dies with it.
 - **testPendingHandoverIsDrainedWhenTheMintIsRejectedByTheDiscriminator** — the other way a mint never

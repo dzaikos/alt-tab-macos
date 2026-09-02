@@ -132,10 +132,12 @@ Several independent signals locate tabs, used at different times:
   that is MORE RECENTLY FOCUSED than the reading active — AX reads are queued, so a read can land right after
   the user switched to another member, and treating the reader as the active then ejected the REAL active
   from its own group, stranding it as a stray tile that successive stale reads fought over (rec18). Strict
-  `<`, so a genuinely-departed window still reaches `toUntabWids`. A newly discovered active also keeps the
-  whole handover group it inherited: while that incoming window is still 0×0, normalize leaves the previous
-  active as the presentable representative, and ejecting that un-tabbed representative on the first AX read
-  flashes a second tile during a fast Cmd+T burst (T-02). Returns the group's wids (active first), the
+  `<`, so a genuinely-departed window still reaches `toUntabWids`. The whole handover group is also kept while
+  the reading active has NO FRAME OF ITS OWN: with the incoming window still 0×0, normalize leaves the
+  previous active as the presentable representative, and ejecting that un-tabbed representative flashes a
+  second tile during a fast Cmd+T burst (T-02). Keyed on the active's size rather than on `newlyDiscovered`
+  alone, because the discovery read and a plain `axMainWindow` read can land in the same millisecond and only
+  the first carries the flag (T-12). Returns the group's wids (active first), the
   matched+kept wids, `untrackedTitles` (titles with no window → inactive tabs to discover), and `toUntabWids`
   (windows that were in this group but are no longer tabbed).
   When duplicate titles leave fewer AX slots than compatible tracked windows, an existing member of this
@@ -184,7 +186,9 @@ Several independent signals locate tabs, used at different times:
   cluster, so `zeroSizedMergeClaim` applies the same exact-count proof on the title path: the active must be
   0×0, its AX count must equal every candidate plus itself, all candidates must be ordered out, and none may
   belong to another visible group. A normally sized active still obeys the strict position rule; the captured
-  Terminal merge and `testNoTitleMatchEverClaimsAcrossFrames` pin that boundary.
+  Terminal merge and `testNoTitleMatchEverClaimsAcrossFrames` pin that boundary. What the claim proves also
+  waives the SIZE test on the borrowed/held leg, for the same reason: against a 0×0 active that test can only
+  ever fail, and the member it failed on is the one normalize promoted to representative.
 - **`positionsCompatible(a, b) -> Bool`** — tabs share their parent's frame. An existing tab link wins (a
   stale position can't split an already-grouped pair). Unknown position or either fullscreen → title-only
   fallback (true). Otherwise positions must match EXACTLY (rounded): macOS cascades new windows by 29px, so
@@ -429,6 +433,16 @@ and silence is not a verdict.
   copied onto a window by the tab machinery is not on-screen evidence, on either claim path (rec20).
 - **testHeldBackgroundingTabGroupsByGeometryDespiteBorrowedSpace** — the geometry path of the same fact: a
   held member counts as background despite its borrowed Space; both claim paths must agree.
+- **testZeroSizedMergeKeepsThePromotedRepresentative** — the size gate on the borrowed leg is waived for a
+  member the zero-sized merge claim already proved. After Merge All Windows the merged active is 0x0, so no
+  real tab can ever match its size, and the absorbed tab normalize had promoted to representative (un-tabbed,
+  holding a lent Space) was ejected from its own group on the next AX read — a second Finder tile that then
+  went phantom (live QA T-03, 2026-08-29).
+- **testFramelessActiveKeepsThePromotedRepresentative** — the same ejection through the other door: mid
+  Cmd+T burst the incoming tab is 0x0, normalize promoted the previous tab to representative (un-tabbed, on
+  screen, claimable by no pass), and the read that landed a millisecond behind the discovery one — without
+  `activeIsNewlyDiscovered` — untabbed it. The burst drew 3 Finder tiles instead of 2 (live QA T-12,
+  2026-08-31).
 - **testDynamicTitleMismatchKeepsSibling** — the cause-B flap, now fixed: the active's AXTabGroup reports the
   inactive tab as "B2" (Terminal renamed it) but the tracked window still reads "B1". Title equality fails,
   but the sibling is still tabbed into this group, so it is **kept** (not shown as a separate window) and "B2"

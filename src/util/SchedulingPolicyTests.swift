@@ -125,6 +125,20 @@ final class SchedulingPolicyTests: XCTestCase {
         XCTAssertEqual(InactiveTabScanPolicy.attemptsAfterScan(previousAttempts: 2, sameSituation: false, adopted: 0), 1)
     }
 
+    /// A candidate the sweep found and the caller handed back — because it is parked on ANOTHER window of the
+    /// same app, so it is that window's tab — rewinds the cursor onto itself instead of being stepped over.
+    /// Two tab groups of one app used to be permanently uncrossable this way: each requester's sweep stopped
+    /// on the other group's tabs, dropped them, and moved the shared cursor past them, so the requester that
+    /// owned them started above them next time (QA C-05, six tabs collapsing to two).
+    func testACandidateLeftForAnotherWindowIsNotSteppedOver() {
+        XCTAssertEqual(InactiveTabScanPolicy.nextCursor(adopted: 0, deferredId: 21446, sweptTo: 21267), 21267)
+        XCTAssertEqual(InactiveTabScanPolicy.nextCursor(adopted: 0, deferredId: 21200, sweptTo: 21267), 21200)
+        // nothing deferred ⇒ resume where the sweep stopped, as before
+        XCTAssertEqual(InactiveTabScanPolicy.nextCursor(adopted: 0, deferredId: nil, sweptTo: 21267), 21267)
+        // an adoption restarts from the anchor: the window set moved, so the band to sweep did too
+        XCTAssertEqual(InactiveTabScanPolicy.nextCursor(adopted: 2, deferredId: 21200, sweptTo: 21267), 0)
+    }
+
     // MARK: - D. SurfaceAcquisitionPolicy
 
     /// a surface with no failure on record is swept, as before

@@ -617,7 +617,17 @@ enum TabGroupResolver {
                     // inactive tab — without that protection, a NEW same-title window (Finder cmd-N,
                     // duplicate titles) was claimed to fill a title whose real tab has no window (Finder
                     // destroys a backgrounded tab's window), and vanished from the switcher.
-                    && (s.isTabbed || s.spaceIds.isEmpty || (spaceIsOurAnnotation(s) && sizesMatch(active, s)))
+                    // The size gate on that last leg is waived for a member the zero-sized merge claim
+                    // already proved, because there the active is 0×0 by construction and NO real tab can
+                    // ever match its size: Merge All Windows publishes the merged window unsized, normalize
+                    // promotes an absorbed tab to presentable representative (un-tabbed, holding the Space
+                    // it was lent), and the next AX read then found it neither Space-less nor size-matched
+                    // and ejected it from its own group — it stood as a second Finder tile and then went
+                    // phantom (live QA T-03, 2026-08-29). The exact AX count is what stands in for the
+                    // geometry here, on this leg exactly as it already does for the position test below.
+                    && (s.isTabbed || s.spaceIds.isEmpty
+                        || (spaceIsOurAnnotation(s)
+                            && (sizesMatch(active, s) || zeroSizedMergeWids.contains(s.wid))))
                     // ...and the same rule the geometry path applies, stated twice as this file requires: a
                     // candidate the WindowServer still shows ON SCREEN is a real window, never somebody's
                     // inactive tab, whatever its Space says (a background tab is ordered OUT — measured). An
@@ -695,10 +705,15 @@ enum TabGroupResolver {
         // it as a stray visible tile that the next stale read fought over, endlessly. A stale read keeps the
         // fresher member; the strict `<` means a genuinely-departed window (equal or older focus) still falls
         // through to `toUntabWids`.
-        // A newly discovered active also keeps every member of the handover group the reducer just inherited.
-        // During a rapid Cmd+T burst the incoming window is still 0×0, so normalize deliberately leaves the
-        // prior active as the presentable representative (`isTabbed == false`). Ejecting that representative
-        // on the first AX read splits one window into two tiles until the incoming frame arrives (T-02).
+        // Also kept, while the reading active has NO FRAME OF ITS OWN: every member of the handover group the
+        // reducer just inherited. During a rapid Cmd+T burst the incoming window is 0×0, so normalize leaves
+        // the prior active as the presentable representative (`isTabbed == false`) — which the title pass
+        // cannot claim (on screen, un-tabbed) and the token pass has never read as a selected tab, so
+        // ejecting it splits one window into two tiles until the incoming frame arrives (T-02).
+        // Keyed on the active's own size, not on `activeIsNewlyDiscovered` alone: the discovery read and a
+        // plain `axMainWindow` read can land in the same millisecond and only the first carries the flag, so
+        // the second untabbed the representative and a Cmd+T burst drew a third Finder tile until the
+        // geometry pass repaired it 385ms later (live QA T-12, 2026-08-31).
         // Windows the OS itself puts in this group: they named the SAME `AXTabGroup` element as the active
         // (`TabGroupToken`). Every other route here is an inference ABOUT a group — a title that might be
         // shared or composed differently (#5785), a frame that might coincide — while this one is the group,
@@ -736,7 +751,7 @@ enum TabGroupResolver {
         let keptWids = sameAppWindows.filter { s in
             s.wid != active.wid && !matchedWids.contains(s.wid)
                 && s.tabbedSiblingWids?.contains(active.wid) == true
-                && (s.isTabbed || activeIsNewlyDiscovered
+                && (s.isTabbed || activeIsNewlyDiscovered || !isPresentable(active)
                     || (!s.spaceIds.isEmpty && s.lastFocusOrder < active.lastFocusOrder))
         }.map { $0.wid }
         matchedWids.append(contentsOf: keptWids)

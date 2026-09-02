@@ -61,6 +61,13 @@ recorded, and a situation gets a small budget instead of exactly one shot.
   retries climb the id space instead of re-walking what already failed.
 - **testASuccessfulScanSpendsNoBudget** — a scan that adopted something made progress and the situation it
   leaves is new anyway; only a fruitless attempt consumes budget, and a fresh situation restarts it.
+- **testACandidateLeftForAnotherWindowIsNotSteppedOver** — a sweep stops as soon as it has as many title
+  matches as there are untracked tabs, and the caller drops the ones parked on another window of the same app:
+  they are that window's tabs. Those are a find for a DIFFERENT requester, so stepping the shared cursor past
+  them made two tab groups of one app permanently uncrossable — measured on a cold launch with Finder holding
+  two 3-tab groups, each requester's sweep kept finding only the other's tabs and six tabs came back as the
+  two that were active (QA C-05). A deferred candidate rewinds the cursor onto itself; the attempt budget
+  above still bounds the whole thing.
 
 ### D. SurfaceAcquisitionPolicy
 

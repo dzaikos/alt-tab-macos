@@ -988,6 +988,14 @@ enum WindowEventReducer {
             if !members.isEmpty {
                 let formed = state.formGroup([wid] + members, representative: wid, reason: "mintedTabSwitch")
                 effects.append(contentsOf: formed.logs.map { .log($0) })
+                // Refresh the frames, exactly as the TRACKED half of this handover does on `joinedSpace`.
+                // This wid was discovered by the brute-force AX scan while it was still a background tab, so
+                // the position it arrived with is the one it wore THERE — and the order-in that moved it onto
+                // its parent's frame fired before we ever subscribed to its notifications, so no geometry
+                // event will ever correct it. Live QA T-20 caught it: clicking a background window's tab
+                // brought that window to the front, and the minted tab still sat at the other window's
+                // cascade position, which is a frame every geometry rule below then reasons from.
+                effects.append(.queryWindowServerState(wids: [wid] + members, throttled: false))
                 // ...and give it the standing to KEEP that. A mint arrives with no focus history at all, and
                 // `normalizeGroupVisibility` re-elects by recency on the very next pass — handing the group
                 // straight back to a background tab that does have some, whose missing thumbnail then draws

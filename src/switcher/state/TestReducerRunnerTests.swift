@@ -663,6 +663,37 @@ final class TestReducerRunnerTests: XCTestCase {
         XCTAssertEqual(harness.state.carried.pendingGroupInheritance[900]?.sorted(), [100, 101])
     }
 
+    /// A minted tab arrives wearing the frame it had as a BACKGROUND tab, and nothing will correct it: the
+    /// order-in that moved it onto its parent's frame fires before we ever subscribe to that wid, and a
+    /// background tab gets no geometry events. So the group formation has to ask the WindowServer, exactly as
+    /// the tracked half of the same handover does on `joinedSpace`. Live QA T-20 (2026-08-29): clicking a
+    /// background window's tab fronted that window, and its new active tab still sat at the OTHER window's
+    /// cascade position — a frame every geometry rule then reasons from.
+    func testMintedTabSwitchRefreshesTheIncomingFrameFromTheWindowServer() {
+        var s = state(windows: [window(100, spaceIds: [30], lastFocusOrder: 0),
+                                window(101, spaceIds: [], lastFocusOrder: 1)])
+        s.formGroup([100, 101], representative: 100, reason: "test")
+        s.visibleSpaces = [3]
+        let harness = TestReducerRunner(initial: s)
+        harness.run([
+            .input(.windowCreated(wid: 900, now: 10.0, inSpaceTransition: false)),
+            .input(.spaceMembershipChanged(wid: 900, spaceId: 30, added: true, now: 10.01,
+                                           inSpaceTransition: false)),
+            .input(.spaceMembershipChanged(wid: 100, spaceId: 30, added: false, now: 10.02,
+                                           inSpaceTransition: false)),
+            .track(window(900, spaceIds: [30])),
+            .input(.discoveryLanded(wid: 900, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
+                                    queriedSpaceIds: [30], isOrderedIn: true, tabTitles: nil,
+                                    tabGroupToken: nil)),
+        ])
+        XCTAssertEqual(harness.state.groups.siblingWids(of: 900)?.sorted(), [100, 101, 900])
+        let asked = harness.pendingRequests.contains {
+            if case .queryWindowServerState(let wids, _) = $0 { return wids.contains(900) && wids.contains(100) }
+            return false
+        }
+        XCTAssertTrue(asked, "the minted tab's frame was never re-read from the WindowServer")
+    }
+
     /// The pid check `recordHandover` does inline for two tracked windows has to happen at CONSUMPTION when
     /// one side was untracked — that is the first moment the pid exists. A coincidence between two apps must
     /// not survive the wait.

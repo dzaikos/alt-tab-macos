@@ -393,6 +393,46 @@ final class TabGroupResolverTests: XCTestCase {
         XCTAssertEqual(m.untrackedTitles, [])
     }
 
+    func testZeroSizedMergeKeepsThePromotedRepresentative() {
+        // Live QA T-03 (2026-08-29): after Merge All Windows the merged active is 0x0, so normalize promotes
+        // one absorbed tab to presentable representative — un-tabbed, wearing the Space it was lent. The
+        // strict size gate on the borrowed leg can never pass against a 0x0 active, so the very next AX read
+        // ejected that representative from its own group and it stood as a second Finder tile. The exact tab
+        // count already proves the fold, so it waives the size test here as it does the position test.
+        let active = tw(wid: 1, size: .zero, position: .zero, title: "A", tabbedSiblingWids: [1, 2, 3, 4],
+                        lastFocusOrder: 0, tabCount: 4)
+        var rep = tw(wid: 2, position: CGPoint(x: 129, y: 129), spaceIds: [1], title: "B",
+                     tabbedSiblingWids: [1, 2, 3, 4], lastFocusOrder: 1)
+        rep.spaceIsBorrowed = true
+        let tabs = [tw(wid: 3, position: CGPoint(x: 158, y: 158), spaceIds: [], title: "C", isTabbed: true,
+                       tabbedSiblingWids: [1, 2, 3, 4]),
+                    tw(wid: 4, position: CGPoint(x: 187, y: 187), spaceIds: [], title: "D", isTabbed: true,
+                       tabbedSiblingWids: [1, 2, 3, 4])]
+        let m = TabGroupResolver.matchSiblings(active: active, axTitles: ["A", "B", "C", "D"],
+                                                sameAppWindows: [active, rep] + tabs)
+        XCTAssertEqual(m.siblingWids.sorted(), [1, 2, 3, 4])
+        XCTAssertTrue(m.toUntabWids.isEmpty)
+        XCTAssertTrue(m.untrackedTitles.isEmpty)
+    }
+
+    func testFramelessActiveKeepsThePromotedRepresentative() {
+        // Live QA T-12 (2026-08-31): mid Cmd+T burst the incoming tab is 0x0, so normalize left the previous
+        // tab as the group's presentable representative — un-tabbed and on screen, which no claim path can
+        // re-take. The discovery read kept it; the plain `axMainWindow` read that landed in the same
+        // millisecond had no `activeIsNewlyDiscovered` and untabbed it, and the burst drew 3 Finder tiles
+        // instead of 2 until the geometry pass repaired it.
+        let active = tw(wid: 3, size: .zero, position: .zero, title: "lwouis", tabbedSiblingWids: [1, 2, 3],
+                        lastFocusOrder: 0, tabCount: 3)
+        let rep = tw(wid: 2, title: "lwouis", tabbedSiblingWids: [1, 2, 3], isOrderedIn: true, lastFocusOrder: 1)
+        let background = tw(wid: 1, spaceIds: [], title: "lwouis", isTabbed: true,
+                            tabbedSiblingWids: [1, 2, 3], lastFocusOrder: 2)
+        let m = TabGroupResolver.matchSiblings(active: active, axTitles: ["lwouis", "lwouis", "lwouis"],
+                                                sameAppWindows: [active, rep, background])
+        XCTAssertEqual(m.siblingWids.sorted(), [1, 2, 3])
+        XCTAssertEqual(m.toUntabWids, [], "ejecting the representative is what drew the third tile")
+        XCTAssertEqual(m.untrackedTitles, [])
+    }
+
     func testTitleMatchCannotTakeATabFromAnotherVisibleGroup() {
         let active = tw(wid: 1, title: "same", tabbedSiblingWids: [1, 2, 3], tabCount: 3)
         let own = tw(wid: 2, spaceIds: [], title: "same", isTabbed: true, tabbedSiblingWids: [1, 2, 3])

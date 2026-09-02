@@ -546,6 +546,10 @@ class Applications {
                 let (found, nextId) = AXUIElement.untrackedWindowsByBruteForce(
                     pid, excluding: trackedWids, matching: untrackedTitles, from: startId)
                 var adopted = 0
+                // The lowest id this sweep found and handed back because it belongs to ANOTHER window of
+                // this app. It is a find for that window's own sweep, so the cursor must not step over it
+                // (`InactiveTabScanPolicy.nextCursor`).
+                var deferredId: AXUIElementID?
                 for (wid, element, title) in found {
                     guard let raw = WindowServerQuery.query([wid]).first else {
                         Logger.debug { "inactive tab wid:\(wid) '\(title)' has no WindowServer data; skipping" }
@@ -570,7 +574,8 @@ class Applications {
                     }
                     guard BruteForceWindowMatch.isPlausibleInactiveTab(
                         candidate: raw.bounds, requester: requesterFrame, otherWindowsOfApp: otherFrames) else {
-                        Logger.debug { "inactive tab candidate wid:\(wid) '\(title)' sits at \(raw.bounds.origin), on another window of this app rather than on #\(requesterWid); it is that window's tab, skipping" }
+                        if let elementId = element.id() { deferredId = min(deferredId ?? elementId, elementId) }
+                        Logger.debug { "inactive tab candidate wid:\(wid) '\(title)' sits at \(raw.bounds.origin), on another window of this app rather than on #\(requesterWid); it is that window's tab, deferring it to that window's own scan" }
                         continue
                     }
                     Logger.debug { "discovered inactive tab via brute-force: wid:\(wid) '\(title)' at \(raw.bounds.origin) for #\(requesterWid)" }
@@ -582,12 +587,13 @@ class Applications {
                 // transient miss (the app's AX tree not ready yet at launch).
                 let attempts = InactiveTabScanPolicy.attemptsAfterScan(previousAttempts: previous?.attempts ?? 0,
                     sameSituation: previous?.situation == situation, adopted: adopted)
+                let cursor = InactiveTabScanPolicy.nextCursor(adopted: adopted, deferredId: deferredId, sweptTo: nextId)
                 if adopted == 0 {
-                    Logger.debug { "inactive-tab scan found nothing (attempt \(attempts)/\(InactiveTabScanPolicy.maxAttemptsPerSituation), ids \(startId)..<\(nextId))" }
+                    Logger.debug { "inactive-tab scan found nothing (attempt \(attempts)/\(InactiveTabScanPolicy.maxAttemptsPerSituation), ids \(startId)..<\(nextId), resuming at \(cursor))" }
                 }
                 DispatchQueue.main.async {
                     lastInactiveTabScan[pid] = (situation, attempts)
-                    inactiveTabScanCursor[pid] = adopted > 0 ? 0 : nextId
+                    inactiveTabScanCursor[pid] = cursor
                 }
             }
         }
