@@ -365,6 +365,7 @@ class Window {
     }
 
     func focus() {
+        MainThreadStall.step()
         if let altTabWindow = altTabWindow() {
             App.shared.activate(ignoringOtherApps: true)
             altTabWindow.makeKeyAndOrderFront(nil)

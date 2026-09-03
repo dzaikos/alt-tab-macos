@@ -48,6 +48,7 @@ class TilesView {
     }
 
     static func endSearchSession() {
+        MainThreadStall.step()
         Windows.updateSearchQuery("")
         TilesPanel.shared.resetFrozenPosition()
         searchMode = .off
@@ -77,6 +78,7 @@ class TilesView {
     }
 
     static func disableSearchMode() {
+        MainThreadStall.step()
         guard SearchModeResolver.disable(mode: searchMode) == .exitToOff else { return }
         TilesPanel.shared.resetFrozenPosition()
         searchMode = .off
@@ -88,6 +90,7 @@ class TilesView {
     }
 
     static func enableSearchEditing() {
+        MainThreadStall.step()
         switch SearchModeResolver.enableEditing(mode: searchMode, canSearch: ProFeature.searchInSwitcher.attemptUse()) {
             case .placeCaretOnly:
                 giveTheFieldTheCaret()

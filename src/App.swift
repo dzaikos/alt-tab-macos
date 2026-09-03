@@ -76,6 +76,7 @@ class App: AppCenterApplication {
     /// focus, so the two things the user is waiting for are both out before any bookkeeping.
     /// Returns false when the switcher was already hidden.
     private static func beginHideUi(_ keepPreview: Bool) -> Bool {
+        MainThreadStall.step()
         Logger.debug { "active:\(SwitcherSession.isActive)" }
         guard SwitcherSession.current != nil else { return false } // already hidden
         SwitcherSession.current = nil
@@ -89,6 +90,7 @@ class App: AppCenterApplication {
     /// The rest of the dismissal, none of it visible. Kept behind the focus request because
     /// `TilesView.endSearchSession` can stall on the OS text-input services (#5981).
     private static func endHideUi() {
+        MainThreadStall.step()
         // Two event-server round trips (`tapIsEnabled`, then `tapEnable`), measured at up to 8ms on
         // macOS 26.6.2. Behind the focus request rather than in front of it: the tap's callback already
         // passes Esc through once `SwitcherSession.isActive` is false, so nothing absorbs a key in the gap.
@@ -289,6 +291,7 @@ class App: AppCenterApplication {
     }
 
     static func focusSelectedWindow(_ selectedWindow: Window?) {
+        MainThreadStall.step()
         guard beginHideUi(true) else { return } // already hidden
         if let window = selectedWindow, MissionControl.state() == .inactive || MissionControl.state() == .showDesktop {
             window.focus()
@@ -326,6 +329,7 @@ class App: AppCenterApplication {
     }
 
     static func refreshUi(_ preserveScrollPosition: Bool = false) {
+        MainThreadStall.step()
         guard SwitcherSession.isActive else { return }
         let preservedScrollOrigin = preserveScrollPosition ? TilesView.currentScrollOrigin() : nil
         Windows.updateSelectedWindow()
@@ -341,6 +345,7 @@ class App: AppCenterApplication {
     }
 
     static func showUiOrCycleSelection(_ shortcutIndex: Int, _ forceDoNothingOnRelease_: Bool) {
+        MainThreadStall.step()
         let session = SwitcherSession.current ?? {
             let new = SwitcherSession()
             // The window set as it stood at the press. Only something ABSENT from it can be a newcomer that
@@ -402,6 +407,7 @@ class App: AppCenterApplication {
     }
 
     static func buildUiAndShowPanel(_ listChangedSincePress: Bool = false) {
+        MainThreadStall.step()
         guard SwitcherSession.isActive else { return }
         // A delayed show renders a list that was filtered at the PRESS. Windows discovered during the delay
         // are appended with `shouldShowTheUser` still at its default `true`, and the repaint that would
@@ -529,6 +535,7 @@ extension App: NSApplicationDelegate {
         App.appCenterDelegate = AppCenterCrash()
         App.shared.disableRelaunchOnLogin()
         Logger.initialize()
+        MainThreadStall.observe()
         Logger.info { "Launching AltTab \(App.version)" }
         // Create the background queues first, before anything that can pump the main run loop re-entrantly
         // (the "move to /Applications" modal below, the WindowServer tap's discovery). Window.init reads
