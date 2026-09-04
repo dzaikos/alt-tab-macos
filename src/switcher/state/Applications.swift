@@ -672,6 +672,41 @@ class Applications {
         applyObservedTabGroup(wid: wid, pid: pid, observation: tabGroup, source: "axCreated")
     }
 
+    /// **The element every OTHER notification arrives holding, offered to a window that has none.** A
+    /// notification is a push: nothing in AppKit's posting path consults a Space, so an app announcing a
+    /// window on another Space hands over that window's element even though `kAXWindows` omits it and
+    /// `kAXFocusedWindow` / `kAXMainWindow` name a different one. Measured cross-process on macOS 26.6.2
+    /// (alt-tab-experiments `window-acquisition/offspace-push`): the element carries the right wid, reads its
+    /// attributes, and accepts writes for as long as the window lives. For such a wid this is a free
+    /// acquisition on a channel already open, where the alternative is the brute-force sweep.
+    ///
+    /// **Only for a window with no element**, deliberately. Adopting on every focus change would rebind a
+    /// perfectly good element on the hot path and pay the role read below every time, for nothing: a window
+    /// AltTab already resolved keeps its element when it moves to another Space. Staleness has its own repair
+    /// (`Window.refreshedAxElement`).
+    ///
+    /// **The role read is not optional.** `_AXUIElementGetWindow` answers with the CONTAINING window's id for
+    /// a descendant too, and apps do name descendants: Chrome posts `AXTitleChanged` with an `AXStaticText`
+    /// whose wid is its window's. Binding that as the window's element would send every later read and AX
+    /// action to a text node. `BruteForceWindowMatch.isTargetWindowRoot` is the same #5849 root check the
+    /// sweep applies to its candidates; the wid half is already proven by the caller, the role half is what
+    /// this pays one round trip for, and only for windows that have no element at all.
+    static func applyObservedElement(wid: CGWindowID, pid: pid_t, element: AXUIElement, source: String) {
+        guard let window = Windows.byWindowId[wid], window.application.pid == pid,
+              window.axUiElement == nil else { return }
+        AXCallScheduler.shared.schedule(key: "wid-\(wid)-adopt", context: window.application.debugId, pid: pid) {
+            let role = try element.attributes([kAXRoleAttribute], pid: pid).role
+            guard BruteForceWindowMatch.isTargetWindowRoot(candidateWid: wid, candidateRole: role,
+                targetWid: wid) else { return }
+            DispatchQueue.main.async {
+                guard let window = Windows.byWindowId[wid], window.application.pid == pid,
+                      window.axUiElement == nil else { return }
+                Logger.debug { "axAdopt #\(wid) pid=\(pid) src=\(source)" }
+                window.rebindAxElement(element)
+            }
+        }
+    }
+
     private static func consumePendingAxCreation(wid: CGWindowID, pid: pid_t) -> PendingAxCreation? {
         guard let pending = pendingAxCreations.removeValue(forKey: wid), pending.pid == pid,
               pending.expiresAt > ProcessInfo.processInfo.systemUptime else { return nil }

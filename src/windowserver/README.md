@@ -45,6 +45,13 @@ brute-force shares a 250ms budget across whatever is left. Exact event-driven di
 wid. A window backed only by an exact attention signal plus its WindowServer row can still be shown and
 focused; actions needing an AX element self-heal after acquisition succeeds.
 
+There is one route that is not a lookup at all. Every AX notification arrives holding the element of the
+window it is about, and nothing in AppKit's posting path consults a Space, so a window `kAXWindows` hides
+still hands its element over when the app announces it (measured cross-process, alt-tab-experiments
+`window-acquisition/offspace-push`). `Applications.applyObservedElement` adopts that element for a window
+that has none, after a role check — a notification may name a descendant, whose wid is its window's. It is a
+push, so it only reaches windows that speak: it shrinks the brute-force population rather than replacing it.
+
 ## Pure vs impure
 
 Pure kernels are co-located triads (`Foo.swift` + `FooSpecs.md` + `FooTests.swift`), compiled into both the

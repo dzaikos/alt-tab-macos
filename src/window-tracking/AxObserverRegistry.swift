@@ -117,6 +117,15 @@ class AxObserverRegistry {
         }
     }
 
+    /// Does this window already have a cached element? The mirror is written on every transition of
+    /// `Window.axUiElement` (init, rebind, removal), so an entry means yes. ADVISORY ONLY: it is read off
+    /// main, where the model may have moved on, and `Applications.applyObservedElement` re-checks the real
+    /// thing. Being behind costs one main hop that gets rejected there; being ahead costs nothing, since a
+    /// window the model no longer holds is one that hop would have rejected anyway.
+    private static func hasTrackedElement(pid: pid_t, wid: CGWindowID) -> Bool {
+        trackedElements.withLock { $0[pid]?[wid] != nil }
+    }
+
     private struct ObserverEntry {
         let process: ProcessGeneration
         let observer: AXObserver
@@ -416,6 +425,7 @@ class AxObserverRegistry {
                                         context: "axSemantics", pid: process.pid) {
             guard let wid = try? element.cgWindowId(pid: process.pid), wid != 0,
                   let title = try? element.attributes([kAXTitleAttribute], pid: process.pid).title else { return }
+            Self.offerElement(process, wid, element, source: "axTitle")
             DispatchQueue.main.async { Applications.applyObservedTitle(wid: wid, title: title) }
         }
     }
@@ -472,10 +482,31 @@ class AxObserverRegistry {
         return .group(titles: group.titles, token: group.token)
     }
 
+    /// **Every notification arrives holding a live window element; three of the four handlers used to read
+    /// its wid and drop it.** Offering it costs nothing here: the wid it is keyed by was just read off this
+    /// same element, so the binding is proven rather than guessed. `Applications.applyObservedElement` owns
+    /// the decision, including the role check that keeps a descendant out of `Window.axUiElement`.
+    ///
+    /// The reason to bother is the other Space: the posting path has no Space term, so this is the only
+    /// channel that hands over an element for a window `kAXWindows` hides, short of the brute-force sweep.
+    /// `windowCreated` is not routed through here because it already hands its element over whole, together
+    /// with the tab group it read.
+    ///
+    /// The mirror check is what keeps the ordinary notification off the main queue: almost every window this
+    /// is called for already has an element, and that answer is available right here.
+    private static func offerElement(_ process: ProcessGeneration, _ wid: CGWindowID, _ element: AXUIElement,
+                                     source: String) {
+        guard wid != 0, !hasTrackedElement(pid: process.pid, wid: wid) else { return }
+        DispatchQueue.main.async {
+            Applications.applyObservedElement(wid: wid, pid: process.pid, element: element, source: source)
+        }
+    }
+
     private func recordTabSignal(_ process: ProcessGeneration, _ element: AXUIElement) {
         AXCallScheduler.shared.schedule(key: "axobs-tab-\(process.pid)", context: "axSemantics",
                                         pid: process.pid) {
             let wid = try element.cgWindowId(pid: process.pid)
+            Self.offerElement(process, wid, element, source: "axFocusedTab")
             DispatchQueue.main.async {
                 TrackingTelemetryRecorder.axFocusedTabSignal(pid: process.pid, wid: wid)
             }
@@ -494,6 +525,7 @@ class AxObserverRegistry {
         AXCallScheduler.shared.schedule(key: "axobs-wid-\(process.pid)-\(capability.telemetryName)",
                                         context: "axSemantics", pid: process.pid) {
             let wid = try element.cgWindowId(pid: process.pid)
+            Self.offerElement(process, wid, element, source: capability.telemetryName)
             // **The tab switch, carrying its group.** `AXMainWindowChanged` is what the OS emits when the
             // selected tab changes, and the element it hands over answers for its `AXTabGroup` right here —
             // the group's own identity, rather than the arrival-time pairing plus title matching the reducer
