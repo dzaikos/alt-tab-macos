@@ -8,7 +8,7 @@ import Cocoa
 enum WindowAcquisitionPolicy {
     /// How to get the AX element for a newly-discovered wid.
     enum Route: Equatable {
-        case currentSpaceViaApplicationWindows  // cheap: AXUIElementCreateApplication(pid).kAXWindows, match by wid
+        case currentSpaceViaApplicationWindows  // cheap: one batched read of the app's published windows, match by wid
         case otherSpaceViaBruteForce            // _AXUIElementCreateWithRemoteToken enumeration, targeted + cached
     }
 }

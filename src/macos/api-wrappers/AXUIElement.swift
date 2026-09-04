@@ -198,19 +198,13 @@ extension AXUIElement {
         }
     }
 
-    /// The app's windows on the CURRENT Space (AX `kAXWindows`); does NOT return other-Space windows — use
-    /// `windowByBruteForce` to resolve a specific other-Space wid.
-    func windows() throws -> [AXUIElement] {
-        let windows = try attributes([kAXWindowsAttribute]).windows
-        if let windows,
-           !windows.isEmpty {
-            // bug in macOS: sometimes the OS returns multiple duplicate windows (e.g. Mail.app starting at login)
-            let uniqueWindows = Array(Set(windows))
-            if !uniqueWindows.isEmpty {
-                return uniqueWindows
-            }
-        }
-        return []
+    /// The window elements an app hands us for one batched read, per `PublishedWindows` — `kAXWindows` (the
+    /// CURRENT Space only) plus the two window attributes AppKit does NOT put behind that Space filter. Same
+    /// single round trip either way, so the other-Space reach costs no IPC. The specs hold the why.
+    func windowsIncludingKeyAndMain() throws -> [AXUIElement] {
+        let attributes = try attributes(PublishedWindows.attributes)
+        return PublishedWindows.merge(windows: attributes.windows, focused: attributes.focusedWindow,
+                                      main: attributes.mainWindow)
     }
 
     /// Wall-clock budget for any brute-force AX scan. The AXUIElementID space is `UInt64` and a long-lived app's

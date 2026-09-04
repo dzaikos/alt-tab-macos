@@ -36,12 +36,14 @@ attention plane is documented in [`../window-tracking/AttentionOrderSpecs.md`](.
 The AX↔wid bridge is strictly one-directional (`_AXUIElementGetWindow` is element→wid, a Mach MIG call
 resolved by the target app; there is no reverse routine, no window-by-id parameterized attribute, and the
 remote token carries an opaque app-internal id, not a wid — all RE-confirmed). So an AX element for an
-other-Space window can only be obtained by enumerate-and-match (the `_AXUIElementCreateWithRemoteToken`
-brute-force). Elements are therefore acquired lazily and cached. The periodic inventory groups every missing
-wid by process: one `kAXWindows` read resolves its current-Space subset, then one targeted brute-force shares
-a 250ms budget across the remaining set. Exact event-driven discovery still asks for one wid. A window backed
-only by an exact attention signal plus its WindowServer row can still be shown and focused; actions needing an
-AX element self-heal after acquisition succeeds.
+other-Space window can generally only be obtained by enumerate-and-match (the
+`_AXUIElementCreateWithRemoteToken` brute-force). Elements are therefore acquired lazily and cached. The
+periodic inventory groups every missing wid by process: one batched attribute read resolves its current-Space
+subset plus the app's key/main window — `kAXFocusedWindow` and `kAXMainWindow` are the two window attributes
+AppKit does NOT put behind the Space filter, so they name an other-Space root for free — then one targeted
+brute-force shares a 250ms budget across whatever is left. Exact event-driven discovery still asks for one
+wid. A window backed only by an exact attention signal plus its WindowServer row can still be shown and
+focused; actions needing an AX element self-heal after acquisition succeeds.
 
 ## Pure vs impure
 

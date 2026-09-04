@@ -609,7 +609,7 @@ class Applications {
 
     /// Ask the OWNING APP whether it still lists this wid, and act on the answer. Runs on the AX pool.
     ///
-    /// Only the cheap `kAXWindows` route: the brute-force one is time-budgeted, so on an app with high
+    /// Only the cheap published-windows route: the brute-force one is time-budgeted, so on an app with high
     /// AXUIElementIDs it can time out on a window that IS there and hand back the same false "closed" this
     /// guard exists to prevent.
     private static func confirmAbsentFromApp(wid: CGWindowID, pid: pid_t, reason: String) throws {
@@ -623,7 +623,8 @@ class Applications {
         guard outcome != .noAnswer else { throw AxError.appUnresponsive }
         DispatchQueue.main.async {
             guard case let .found(fresh) = outcome else {
-                // `kAXWindows` is current-Space scoped. It may condemn only when a completed membership
+                // The route reaches the current Space plus the app's key/main window, so it does not cover
+                // an arbitrary other-Space window. It may condemn only when a completed membership
                 // observation puts the window inside that scope; a display value borrowed from a tab or
                 // guessed at initialization is not evidence that the query covered it.
                 let axQueryCoversWindow = Windows.byWindowId[wid].map { window -> Bool in
