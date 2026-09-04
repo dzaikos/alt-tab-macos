@@ -1029,7 +1029,18 @@ enum WindowEventReducer {
             // known, so this is where the pairing is actually confirmed.
             let members = inherited.filter { state.window($0).map { $0.pid == window.pid } ?? false }
             if !members.isEmpty {
-                let formed = state.formGroup([wid] + members, representative: wid, reason: "mintedTabSwitch")
+                // **The handover claims a REPRESENTATIVE, not a membership**, and `formGroup` is exact-set, so
+                // forming from the inherited set ALONE ejects whatever a better-informed signal already put in
+                // the group. That set is what `replaced` had when it left, which is a floor, not the answer:
+                // when the app's own AXTabGroup titles land in the same pass and group this wid with MORE of
+                // its tabs, they are the stronger claim about who is in the group. Live QA C-10: a tab opened
+                // while the cold scan was still running formed the right 4-tab group from `axTitles`, and the
+                // handover split it back into [new, replaced] plus the two it evicted — one window, two tiles.
+                // Union, so neither side can shrink the other. When the two agree, `form` takes its same-set
+                // fast path and only moves the representative.
+                let alreadyGrouped = state.groups.siblingWids(of: wid) ?? []
+                let formed = state.formGroup([wid] + members + alreadyGrouped, representative: wid,
+                    reason: "mintedTabSwitch")
                 effects.append(contentsOf: formed.logs.map { .log($0) })
                 // Refresh the frames, exactly as the TRACKED half of this handover does on `joinedSpace`.
                 // This wid was discovered by the brute-force AX scan while it was still a background tab, so

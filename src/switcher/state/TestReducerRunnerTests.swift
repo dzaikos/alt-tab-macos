@@ -771,6 +771,40 @@ final class TestReducerRunnerTests: XCTestCase {
         XCTAssertNil(harness.state.carried.pendingGroupInheritance[900])
     }
 
+    /// **The handover names a representative; it must not shrink the group.** When the app's AXTabGroup
+    /// titles land in the same `discoveryLanded` as the mint, they group the incoming tab with every tab of
+    /// the window — and `formGroup` is exact-set, so re-forming from the inherited pair evicted the rest.
+    /// Live QA C-10 (2026-09-04): a tab opened while the cold scan was still running turned one 4-tab Finder
+    /// window into two tiles, because `axTitles` formed [900, 100, 101, 102] and the handover immediately
+    /// split it back into [900, 100].
+    func testMintedTabSwitchKeepsTheTabsTheTitlesAlreadyGrouped() {
+        var s = state(windows: [window(100, title: "t", spaceIds: [30], lastFocusOrder: 0),
+                                window(101, title: "t", spaceIds: [], lastFocusOrder: 1),
+                                window(102, title: "t", spaceIds: [], lastFocusOrder: 2)])
+        s.formGroup([100, 101], representative: 100, reason: "test")
+        s.visibleSpaces = [3]
+        let harness = TestReducerRunner(initial: s)
+        harness.run([
+            .input(.windowCreated(wid: 900, now: 10.0, inSpaceTransition: false)),
+            .input(.spaceMembershipChanged(wid: 900, spaceId: 30, added: true, now: 10.01,
+                                           inSpaceTransition: false)),
+            .input(.spaceMembershipChanged(wid: 100, spaceId: 30, added: false, now: 10.02,
+                                           inSpaceTransition: false)),
+            .track(window(900, title: "t", spaceIds: [30])),
+            .input(.discoveryLanded(wid: 900, accepted: true, newlyTracked: true, adoptedAsInactiveTab: false,
+                                    queriedSpaceIds: [30], isOrderedIn: true,
+                                    tabTitles: ["t", "t", "t", "t"], tabGroupToken: 5031)),
+        ])
+        XCTAssertEqual(harness.state.groups.siblingWids(of: 900)?.sorted(), [100, 101, 102, 900])
+        // Asserted on the trace, not just the settled state: a later geometry pass re-forms the full group
+        // whenever the evicted tab happens to share the frame, which is what hid this in the model while the
+        // live switcher still drew two tiles.
+        XCTAssertFalse(harness.trace.contains {
+            $0.contains("group form") && $0.contains("reason=mintedTabSwitch") && !$0.contains("102")
+        }, "the handover re-formed the group as an exact set and dropped #102, which the AXTabGroup titles "
+            + "had just put in it: \(harness.trace)")
+    }
+
     /// The edge is about the CURRENT state, so it expires when either end moves again: a window that rejoins
     /// a Space is no longer the one that was replaced.
     func testHandoverIsClearedWhenTheReplacedWindowComesBack() {

@@ -213,6 +213,10 @@ order nothing pins, so both arrival orders are tested — the same thing `Handov
   never fires, and a wid joining a non-visible Space is never even scheduled for discovery), so both pending
   maps drain there. Consumption is not time-bounded, so a leaked edge could later dress a window in a stale
   `replacedWid` that `dragOutVerdict` reads as settled.
+- **testMintedTabSwitchKeepsTheTabsTheTitlesAlreadyGrouped** — the handover claims a REPRESENTATIVE, not a
+  membership. When the AXTabGroup titles land in the same discovery and group the mint with every tab of the
+  window, re-forming from the inherited pair would evict the rest, since `formGroup` is exact-set. Live QA
+  C-10: one 4-tab Finder window drawn as two tiles.
 - **testHandoverIsClearedWhenTheReplacedWindowComesBack** — the edge describes the CURRENT state, so it
   expires when either end moves again.
 
