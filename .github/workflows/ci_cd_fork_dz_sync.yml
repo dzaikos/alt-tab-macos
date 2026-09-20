@@ -17,6 +17,5 @@ jobs:
           git fetch upstream master --tags --force
           git reset --hard upstream/master
           git checkout origin/fork_dz_workflows -- .github/workflows
-          git add .github/workflows/ci_cd_fork_dz_sync.yml .github/workflows/ci_cd_fork_dz.yml
           git commit -m "chore: Add fork workflows"
           git push origin master +refs/tags/*:refs/tags/* --atomic --force
