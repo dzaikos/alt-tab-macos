@@ -18,4 +18,4 @@ jobs:
           git reset --hard upstream/master
           git checkout origin/fork_dz_workflows -- .github/workflows
           git commit -m "chore: Add fork workflows"
-          git push origin master +refs/tags/*:refs/tags/* --atomic --force
+          git push origin master "+refs/tags/*:refs/tags/*" --atomic --force
